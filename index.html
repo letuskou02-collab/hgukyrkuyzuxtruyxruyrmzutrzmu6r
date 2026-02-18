@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#2d7a3e">
+    <meta name="description" content="国道ステッカー取得記録アプリ">
+    
+    <title>国道ステッカー記録</title>
+    
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    
+    <!-- Vue 3 -->
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+    
+    <!-- App CSS -->
+    <link rel="stylesheet" href="styles.css">
+    
+    <link rel="manifest" href="manifest.json">
+    <link rel="icon" type="image/png" sizes="192x192" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect fill='%232d7a3e' width='192' height='192'/><text x='50%' y='50%' font-size='100' font-weight='bold' fill='white' text-anchor='middle' dominant-baseline='middle'>🚗</text></svg>">
+</head>
+<body>
+    <div id="app">
+        <!-- ナビゲーション -->
+        <nav class="navbar">
+            <div class="navbar-brand">
+                <span class="logo">🛣️ 国道ステッカー</span>
+            </div>
+            <div class="nav-tabs">
+                <button 
+                    class="tab-btn" 
+                    :class="{ active: currentTab === 'add' }"
+                    @click="currentTab = 'add'">
+                    追加
+                </button>
+                <button 
+                    class="tab-btn" 
+                    :class="{ active: currentTab === 'list' }"
+                    @click="currentTab = 'list'">
+                    リスト ({{ stickers.length }})
+                </button>
+                <button 
+                    class="tab-btn" 
+                    :class="{ active: currentTab === 'map' }"
+                    @click="currentTab = 'map'">
+                    地図
+                </button>
+            </div>
+        </nav>
+
+        <!-- 追加パネル -->
+        <div v-if="currentTab === 'add'" class="panel add-panel">
+            <h2>新しいステッカーを記録</h2>
+            
+            <form @submit.prevent="addSticker" class="form">
+                <div class="form-group">
+                    <label>国道番号 *</label>
+                    <input 
+                        v-model="form.roadNumber" 
+                        type="number" 
+                        min="1" 
+                        max="999"
+                        placeholder="例: 4"
+                        required>
+                </div>
+
+                <div class="form-group">
+                    <label>取得日 *</label>
+                    <input 
+                        v-model="form.date" 
+                        type="date"
+                        required>
+                </div>
+
+                <div class="form-group">
+                    <label>取得場所</label>
+                    <input 
+                        v-model="form.location" 
+                        type="text"
+                        placeholder="例: 青森県弘前市">
+                </div>
+
+                <div class="form-group">
+                    <label>緯度</label>
+                    <input 
+                        v-model.number="form.latitude" 
+                        type="number"
+                        step="0.000001"
+                        placeholder="例: 40.604">
+                </div>
+
+                <div class="form-group">
+                    <label>経度</label>
+                    <input 
+                        v-model.number="form.longitude" 
+                        type="number"
+                        step="0.000001"
+                        placeholder="例: 140.6235">
+                </div>
+
+                <div class="form-group">
+                    <label>写真</label>
+                    <input 
+                        type="file" 
+                        accept="image/*"
+                        @change="handleImageUpload"
+                        class="file-input">
+                    <div v-if="form.image" class="image-preview">
+                        <img :src="form.image" alt="プレビュー">
+                        <button type="button" @click="form.image = null" class="remove-btn">削除</button>
+                    </div>
+                </div>
+
+                <div class="form-group">
+                    <label>メモ</label>
+                    <textarea 
+                        v-model="form.memo"
+                        placeholder="その他の情報を入力..."
+                        rows="3"></textarea>
+                </div>
+
+                <button type="submit" class="btn btn-primary">記録する</button>
+            </form>
+        </div>
+
+        <!-- リストパネル -->
+        <div v-if="currentTab === 'list'" class="panel list-panel">
+            <h2>記録済みステッカー一覧</h2>
+            
+            <div v-if="stickers.length === 0" class="empty-state">
+                <p>まだステッカーが記録されていません</p>
+            </div>
+
+            <div v-else class="filters">
+                <input 
+                    v-model="searchQuery"
+                    type="text"
+                    placeholder="国道番号で検索..."
+                    class="search-input">
+            </div>
+
+            <div class="sticker-list">
+                <div 
+                    v-for="sticker in filteredStickers" 
+                    :key="sticker.id"
+                    class="sticker-card">
+                    
+                    <div class="card-header">
+                        <h3>国道 {{ sticker.roadNumber }} 号</h3>
+                        <button @click="deleteSticker(sticker.id)" class="delete-btn">×</button>
+                    </div>
+
+                    <div class="card-body">
+                        <p><strong>取得日:</strong> {{ formatDate(sticker.date) }}</p>
+                        <p v-if="sticker.location"><strong>場所:</strong> {{ sticker.location }}</p>
+                        
+                        <div v-if="sticker.image" class="card-image">
+                            <img :src="sticker.image" :alt="'国道' + sticker.roadNumber">
+                        </div>
+
+                        <p v-if="sticker.memo" class="memo">{{ sticker.memo }}</p>
+
+                        <button 
+                            v-if="sticker.latitude && sticker.longitude"
+                            @click="goToMap(sticker)"
+                            class="btn btn-secondary">
+                            地図で表示
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 地図パネル -->
+        <div v-if="currentTab === 'map'" class="panel map-panel">
+            <h2>ステッカー取得地点</h2>
+            <div id="map" class="map-container"></div>
+            
+            <div v-if="selectedMapMarker" class="map-info">
+                <h4>国道 {{ selectedMapMarker.roadNumber }} 号</h4>
+                <p>{{ formatDate(selectedMapMarker.date) }}</p>
+                <p v-if="selectedMapMarker.location">{{ selectedMapMarker.location }}</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
