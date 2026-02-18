@@ -28,8 +28,42 @@
 </head>
 <body>
     <div id="app">
+        <!-- ウェルカムスクリーン -->
+        <div v-if="!initialized" class="welcome-screen">
+            <div class="welcome-container">
+                <div class="welcome-icon">🛣️</div>
+                <h1 class="welcome-title">国道ステッカー</h1>
+                <p class="welcome-subtitle">日本全国の国道ステッカーを記録しよう</p>
+                
+                <div class="welcome-features">
+                    <div class="feature-item">
+                        <span class="feature-icon">📝</span>
+                        <span class="feature-text">ステッカー取得を記録</span>
+                    </div>
+                    <div class="feature-item">
+                        <span class="feature-icon">🗺️</span>
+                        <span class="feature-text">取得地点を地図表示</span>
+                    </div>
+                    <div class="feature-item">
+                        <span class="feature-icon">📸</span>
+                        <span class="feature-text">写真を保存</span>
+                    </div>
+                    <div class="feature-item">
+                        <span class="feature-icon">☁️</span>
+                        <span class="feature-text">データをバックアップ</span>
+                    </div>
+                </div>
+
+                <button @click="startApp" class="btn btn-primary btn-large">
+                    はじめる →
+                </button>
+
+                <p class="welcome-footer">オフライン対応・データはあなたのスマートフォンに保存されます</p>
+            </div>
+        </div>
+
         <!-- ナビゲーション -->
-        <nav class="navbar">
+        <nav v-else class="navbar">
             <div class="navbar-brand">
                 <span class="logo">🛣️ 国道ステッカー</span>
             </div>
@@ -86,19 +120,19 @@
                 </div>
 
                 <div class="form-group">
-                    <label>取得場所</label>
+                    <label>施設名・建物名</label>
                     <div class="location-input-group">
                         <input 
                             v-model="form.location" 
                             type="text"
-                            placeholder="例: 青森県弘前市"
+                            placeholder="例: 東京駅、京都駅、スカイツリー"
                             @blur="geocodeLocation">
                         <button 
                             v-if="form.location && !geocoding"
                             type="button" 
                             @click="geocodeLocation"
                             class="btn btn-secondary btn-small"
-                            title="住所から座標を取得">
+                            title="施設から座標を取得">
                             🔍
                         </button>
                         <span v-if="geocoding" class="geocoding-spinner">⏳</span>

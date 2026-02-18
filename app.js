@@ -69,6 +69,7 @@ const db = new StickerDB();
 createApp({
     data() {
         return {
+            initialized: false,
             stickers: [],
             currentTab: 'add',
             searchQuery: '',
@@ -126,6 +127,11 @@ createApp({
             };
 
             alert('ステッカーを記録しました！');
+        },
+
+        startApp() {
+            this.initialized = true;
+            localStorage.setItem('appInitialized', 'true');
         },
 
         async deleteSticker(id) {
@@ -188,7 +194,9 @@ createApp({
                     // 国道番号をテキストとして表示するマーカーを作成
                     const markerIcon = L.divIcon({
                         html: `<div class="road-number-marker">${sticker.roadNumber}</div>`,
-                        iconSize: [40, 40],
+                        iconSize: [50, 50],
+                        iconAnchor: [25, 25],
+                        popupAnchor: [0, -25],
                         className: 'custom-marker'
                     });
 
@@ -234,7 +242,7 @@ createApp({
 
         async geocodeLocation() {
             if (!this.form.location) {
-                this.geocodingError = '場所を入力してください';
+                this.geocodingError = '施設名を入力してください';
                 return;
             }
 
@@ -242,20 +250,33 @@ createApp({
             this.geocodingError = '';
 
             try {
-                const response = await fetch(
-                    `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(this.form.location)}`
+                // 複数の検索方法を試みる
+                let results = [];
+                
+                // 1. 日本限定で施設名検索
+                const response1 = await fetch(
+                    `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(this.form.location)}&countrycodes=jp&limit=5`
                 );
-                const results = await response.json();
+                results = await response1.json();
+
+                // 2. 結果がない場合は、より広い検索を試みる
+                if (results.length === 0) {
+                    const response2 = await fetch(
+                        `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(this.form.location + ' Japan')}&limit=5`
+                    );
+                    results = await response2.json();
+                }
 
                 if (results.length > 0) {
+                    // 最初の結果を使用
                     this.form.latitude = parseFloat(results[0].lat);
                     this.form.longitude = parseFloat(results[0].lon);
                     this.geocodingError = '';
                 } else {
-                    this.geocodingError = '場所が見つかりません。別の表記で試してください。';
+                    this.geocodingError = `「${this.form.location}」が見つかりません。駅名、施設名、建物名で検索してください。`;
                 }
             } catch (error) {
-                this.geocodingError = '座標の取得に失敗しました: ' + error.message;
+                this.geocodingError = '座標の取得に失敗しました。ネットワークを確認してください。';
             } finally {
                 this.geocoding = false;
             }
@@ -357,5 +378,11 @@ createApp({
 
         // 本日の日付をセット
         this.form.date = new Date().toISOString().split('T')[0];
+
+        // ウェルカムスクリーンの表示判定
+        const appInitialized = localStorage.getItem('appInitialized');
+        if (appInitialized) {
+            this.initialized = true;
+        }
     }
 }).mount('#app');
