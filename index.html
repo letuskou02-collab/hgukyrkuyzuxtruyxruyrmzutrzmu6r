@@ -28,7 +28,7 @@
 </head>
 <body>
     <div id="app">
-        <!-- ウェルカムスクリーン -->
+        <!-- ウェルカムスクリーン（ホーム画面） -->
         <div v-if="!initialized" class="welcome-screen">
             <div class="welcome-container">
                 <div class="welcome-icon">🛣️</div>
@@ -68,6 +68,12 @@
         <!-- ナビゲーション -->
         <nav v-else class="navbar">
             <div class="navbar-brand">
+                <button 
+                    class="home-btn"
+                    @click="goHome"
+                    title="ホーム画面に戻る">
+                    🏠
+                </button>
                 <span class="logo">🛣️ 国道ステッカー</span>
             </div>
             <div class="nav-tabs">
@@ -93,7 +99,7 @@
                     class="tab-btn" 
                     :class="{ active: currentTab === 'menu' }"
                     @click="currentTab = 'menu'">
-                    ⚙️
+                    メニュー
                 </button>
             </div>
         </nav>

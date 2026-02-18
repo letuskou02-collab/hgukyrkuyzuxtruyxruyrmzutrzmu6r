@@ -135,6 +135,11 @@ createApp({
             console.log('initialized set to:', this.initialized);
         },
 
+        goHome() {
+            this.initialized = false;
+            this.currentTab = 'add';
+        },
+
         roundLatitude() {
             if (this.form.latitude !== null && this.form.latitude !== '') {
                 this.form.latitude = Math.round(parseFloat(this.form.latitude) * 1000000) / 1000000;
