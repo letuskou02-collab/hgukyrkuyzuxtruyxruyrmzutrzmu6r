@@ -418,4 +418,126 @@ body {
     .card-header h3 {
         font-size: 1.1rem;
     }
+
+    .menu-btn {
+        width: 100%;
+    }
 }
+
+/* メニューパネル */
+.menu-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+}
+
+.menu-section {
+    background: white;
+    border: 2px solid #e8f5f0;
+    border-radius: 8px;
+    padding: 1.5rem;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.05);
+}
+
+.menu-section h3 {
+    color: #2d7a3e;
+    margin-bottom: 0.8rem;
+    font-size: 1.1rem;
+}
+
+.menu-desc {
+    color: #666;
+    margin-bottom: 1rem;
+    font-size: 0.95rem;
+}
+
+.menu-btn {
+    width: 100%;
+    margin: 0.8rem 0;
+}
+
+.menu-hint {
+    color: #999;
+    font-size: 0.85rem;
+    margin-top: 0.5rem;
+    font-style: italic;
+}
+
+.menu-input {
+    width: 100%;
+    padding: 0.8rem;
+    margin: 0.5rem 0;
+}
+
+.info-section {
+    background: linear-gradient(135deg, #f0f8f4 0%, #e8f5f0 100%);
+}
+
+.info-section p {
+    margin: 0.5rem 0;
+    color: #555;
+}
+
+/* 場所入力グループ */
+.location-input-group {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+}
+
+.location-input-group input {
+    flex: 1;
+    padding: 0.8rem;
+    border: 2px solid #e0e0e0;
+    border-radius: 6px;
+    font-size: 1rem;
+    transition: border-color 0.3s ease;
+}
+
+.location-input-group input:focus {
+    outline: none;
+    border-color: #4fa861;
+    box-shadow: 0 0 0 3px rgba(79, 168, 97, 0.1);
+}
+
+.btn-small {
+    padding: 0.6rem 0.8rem;
+    min-width: 40px;
+}
+
+.geocoding-spinner {
+    font-size: 1.2rem;
+    animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+.error-message {
+    color: #ff6b6b;
+    font-size: 0.85rem;
+    margin-top: 0.5rem;
+}
+
+/* Leaflet カスタムマーカー */
+.custom-marker {
+    filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.2));
+}
+
+.road-number-marker {
+    background: linear-gradient(135deg, #2d7a3e 0%, #1e5c2d 100%);
+    color: white;
+    border: 3px solid #fff;
+    border-radius: 50%;
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: bold;
+    font-size: 16px;
+    box-shadow: 0 2px 8px rgba(45, 122, 62, 0.4);
+}
+

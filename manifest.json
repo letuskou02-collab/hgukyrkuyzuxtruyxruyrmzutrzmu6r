@@ -30,5 +30,33 @@
             "type": "image/svg+xml",
             "form_factor": "narrow"
         }
+    ],
+    "shortcuts": [
+        {
+            "name": "ステッカー追加",
+            "short_name": "追加",
+            "description": "新しいステッカーを記録",
+            "url": "/?tab=add",
+            "icons": [
+                {
+                    "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect fill='%234fa861' width='192' height='192' rx='45'/><text x='50%' y='50%' font-size='100' font-weight='bold' fill='white' text-anchor='middle' dominant-baseline='middle'>+</text></svg>",
+                    "sizes": "192x192",
+                    "type": "image/svg+xml"
+                }
+            ]
+        },
+        {
+            "name": "地図表示",
+            "short_name": "地図",
+            "description": "ステッカー取得地点の地図表示",
+            "url": "/?tab=map",
+            "icons": [
+                {
+                    "src": "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'><rect fill='%234fa861' width='192' height='192' rx='45'/><text x='50%' y='50%' font-size='100' font-weight='bold' fill='white' text-anchor='middle' dominant-baseline='middle'>🗺️</text></svg>",
+                    "sizes": "192x192",
+                    "type": "image/svg+xml"
+                }
+            ]
+        }
     ]
 }

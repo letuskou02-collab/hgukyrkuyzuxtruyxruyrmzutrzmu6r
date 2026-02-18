@@ -75,6 +75,8 @@ createApp({
             selectedMapMarker: null,
             map: null,
             markers: [],
+            geocoding: false,
+            geocodingError: '',
             form: {
                 roadNumber: '',
                 date: new Date().toISOString().split('T')[0],
@@ -183,13 +185,15 @@ createApp({
             this.markers = [];
             this.stickers.forEach(sticker => {
                 if (sticker.latitude && sticker.longitude) {
-                    const marker = L.circleMarker([sticker.latitude, sticker.longitude], {
-                        radius: 8,
-                        fillColor: '#4fa861',
-                        color: '#2d7a3e',
-                        weight: 2,
-                        opacity: 1,
-                        fillOpacity: 0.8
+                    // 国道番号をテキストとして表示するマーカーを作成
+                    const markerIcon = L.divIcon({
+                        html: `<div class="road-number-marker">${sticker.roadNumber}</div>`,
+                        iconSize: [40, 40],
+                        className: 'custom-marker'
+                    });
+
+                    const marker = L.marker([sticker.latitude, sticker.longitude], {
+                        icon: markerIcon
                     }).addTo(this.map);
 
                     marker.bindPopup(`<strong>国道 ${sticker.roadNumber} 号</strong><br>${this.formatDate(sticker.date)}${sticker.location ? '<br>' + sticker.location : ''}`);
@@ -226,6 +230,103 @@ createApp({
                     this.map.fitBounds(group.getBounds(), { padding: [50, 50] });
                 }
             }
+        },
+
+        async geocodeLocation() {
+            if (!this.form.location) {
+                this.geocodingError = '場所を入力してください';
+                return;
+            }
+
+            this.geocoding = true;
+            this.geocodingError = '';
+
+            try {
+                const response = await fetch(
+                    `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(this.form.location)}`
+                );
+                const results = await response.json();
+
+                if (results.length > 0) {
+                    this.form.latitude = parseFloat(results[0].lat);
+                    this.form.longitude = parseFloat(results[0].lon);
+                    this.geocodingError = '';
+                } else {
+                    this.geocodingError = '場所が見つかりません。別の表記で試してください。';
+                }
+            } catch (error) {
+                this.geocodingError = '座標の取得に失敗しました: ' + error.message;
+            } finally {
+                this.geocoding = false;
+            }
+        },
+
+        exportData() {
+            const data = {
+                version: '1.0.0',
+                exportDate: new Date().toISOString(),
+                stickers: this.stickers
+            };
+
+            const jsonStr = JSON.stringify(data, null, 2);
+            const blob = new Blob([jsonStr], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `sticker-backup-${new Date().toISOString().split('T')[0]}.json`;
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+            URL.revokeObjectURL(url);
+
+            alert('エクスポート完了しました！');
+        },
+
+        async importData(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = async (e) => {
+                try {
+                    const data = JSON.parse(e.target.result);
+                    
+                    if (!data.stickers || !Array.isArray(data.stickers)) {
+                        alert('無効なバックアップファイルです');
+                        return;
+                    }
+
+                    const confirmImport = confirm(
+                        `${data.stickers.length} 件のステッカーをインポートします。既存データは上書きされます。よろしいですか？`
+                    );
+
+                    if (confirmImport) {
+                        // 既存データを削除
+                        for (const sticker of this.stickers) {
+                            await db.delete(sticker.id);
+                        }
+
+                        // 新しいデータを追加
+                        for (const sticker of data.stickers) {
+                            await db.add(sticker);
+                        }
+
+                        // UI を更新
+                        this.stickers = await db.getAll();
+                        alert('インポート完了しました！');
+                    }
+                } catch (error) {
+                    alert('ファイル読み込みエラー: ' + error.message);
+                }
+            };
+            reader.readAsText(file);
+
+            // input をリセット
+            event.target.value = '';
+        },
+
+        showInstallPrompt() {
+            alert('iOS: Safari の共有ボタンをタップして「ホーム画面に追加」を選択してください\n\nAndroid: ブラウザメニューから「アプリをインストール」を選択してください');
         }
     },
 

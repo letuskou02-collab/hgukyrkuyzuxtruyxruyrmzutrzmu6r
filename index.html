@@ -2,9 +2,15 @@
 <html lang="ja">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no">
     <meta name="theme-color" content="#2d7a3e">
     <meta name="description" content="国道ステッカー取得記録アプリ">
+    
+    <!-- Apple 用メタタグ -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="ステッカー記録">
+    <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 180 180'><rect fill='%232d7a3e' width='180' height='180' rx='45'/><text x='50%' y='50%' font-size='90' font-weight='bold' fill='white' text-anchor='middle' dominant-baseline='middle'>🛣️</text></svg>">
     
     <title>国道ステッカー記録</title>
     
@@ -46,6 +52,12 @@
                     @click="currentTab = 'map'">
                     地図
                 </button>
+                <button 
+                    class="tab-btn" 
+                    :class="{ active: currentTab === 'menu' }"
+                    @click="currentTab = 'menu'">
+                    ⚙️
+                </button>
             </div>
         </nav>
 
@@ -75,10 +87,23 @@
 
                 <div class="form-group">
                     <label>取得場所</label>
-                    <input 
-                        v-model="form.location" 
-                        type="text"
-                        placeholder="例: 青森県弘前市">
+                    <div class="location-input-group">
+                        <input 
+                            v-model="form.location" 
+                            type="text"
+                            placeholder="例: 青森県弘前市"
+                            @blur="geocodeLocation">
+                        <button 
+                            v-if="form.location && !geocoding"
+                            type="button" 
+                            @click="geocodeLocation"
+                            class="btn btn-secondary btn-small"
+                            title="住所から座標を取得">
+                            🔍
+                        </button>
+                        <span v-if="geocoding" class="geocoding-spinner">⏳</span>
+                    </div>
+                    <p v-if="geocodingError" class="error-message">{{ geocodingError }}</p>
                 </div>
 
                 <div class="form-group">
@@ -181,6 +206,48 @@
                 <h4>国道 {{ selectedMapMarker.roadNumber }} 号</h4>
                 <p>{{ formatDate(selectedMapMarker.date) }}</p>
                 <p v-if="selectedMapMarker.location">{{ selectedMapMarker.location }}</p>
+            </div>
+        </div>
+
+        <!-- メニューパネル -->
+        <div v-if="currentTab === 'menu'" class="panel menu-panel">
+            <h2>メニュー</h2>
+            
+            <div class="menu-section">
+                <h3>ホーム画面に追加</h3>
+                <p class="menu-desc">iPhone でホーム画面に追加するとアプリのように使えます</p>
+                <button @click="showInstallPrompt" class="btn btn-primary menu-btn">
+                    📱 ホーム画面に追加
+                </button>
+                <p class="menu-hint">Safari の共有 → "ホーム画面に追加" をタップ</p>
+            </div>
+
+            <div class="menu-section">
+                <h3>データのバックアップ</h3>
+                <button @click="exportData" class="btn btn-secondary menu-btn">
+                    📤 エクスポート
+                </button>
+                <p class="menu-hint">すべてのステッカーデータを JSON ファイルで保存</p>
+            </div>
+
+            <div class="menu-section">
+                <h3>データの復元</h3>
+                <input 
+                    type="file" 
+                    accept=".json"
+                    @change="importData"
+                    class="file-input menu-input"
+                    id="import-file">
+                <label for="import-file" class="btn btn-secondary menu-btn" style="display: block; text-align: center;">
+                    📥 インポート
+                </label>
+                <p class="menu-hint">バックアップファイルを選択して復元</p>
+            </div>
+
+            <div class="menu-section info-section">
+                <h3>情報</h3>
+                <p><strong>記録数:</strong> {{ stickers.length }} 件</p>
+                <p><strong>バージョン:</strong> 1.0.0</p>
             </div>
         </div>
     </div>
