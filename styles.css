@@ -47,6 +47,8 @@ body {
     text-align: center;
     max-width: 400px;
     color: white;
+    position: relative;
+    z-index: 5;
 }
 
 .welcome-icon {
@@ -115,9 +117,14 @@ body {
     background: white;
     color: #2d7a3e;
     border: none;
+    border-radius: 12px;
     font-weight: bold;
     box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
     transition: all 0.3s ease;
+    cursor: pointer;
+    position: relative;
+    z-index: 10;
+    pointer-events: auto;
 }
 
 .btn-large:hover {
@@ -127,6 +134,11 @@ body {
 
 .btn-large:active {
     transform: translateY(-1px);
+}
+
+.btn-large:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
 }
 
 .welcome-footer {

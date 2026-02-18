@@ -130,8 +130,10 @@ createApp({
         },
 
         startApp() {
+            console.log('startApp called');
             this.initialized = true;
             localStorage.setItem('appInitialized', 'true');
+            console.log('initialized set to:', this.initialized);
         },
 
         async deleteSticker(id) {

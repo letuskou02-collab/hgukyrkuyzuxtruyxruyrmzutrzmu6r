@@ -54,7 +54,10 @@
                     </div>
                 </div>
 
-                <button @click="startApp" class="btn btn-primary btn-large">
+                <button 
+                    type="button"
+                    @click.prevent="startApp" 
+                    class="btn btn-primary btn-large">
                     はじめる →
                 </button>
 
