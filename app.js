@@ -132,8 +132,19 @@ createApp({
         startApp() {
             console.log('startApp called');
             this.initialized = true;
-            localStorage.setItem('appInitialized', 'true');
             console.log('initialized set to:', this.initialized);
+        },
+
+        roundLatitude() {
+            if (this.form.latitude !== null && this.form.latitude !== '') {
+                this.form.latitude = Math.round(parseFloat(this.form.latitude) * 1000000) / 1000000;
+            }
+        },
+
+        roundLongitude() {
+            if (this.form.longitude !== null && this.form.longitude !== '') {
+                this.form.longitude = Math.round(parseFloat(this.form.longitude) * 1000000) / 1000000;
+            }
         },
 
         async deleteSticker(id) {
@@ -381,10 +392,7 @@ createApp({
         // 本日の日付をセット
         this.form.date = new Date().toISOString().split('T')[0];
 
-        // ウェルカムスクリーンの表示判定
-        const appInitialized = localStorage.getItem('appInitialized');
-        if (appInitialized) {
-            this.initialized = true;
-        }
+        // ウェルカムスクリーンは毎回表示（毎回 false に保つ）
+        // this.initialized = false; // 常にウェルカムスクリーン表示
     }
 }).mount('#app');

@@ -146,19 +146,21 @@
                 <div class="form-group">
                     <label>緯度</label>
                     <input 
-                        v-model.number="form.latitude" 
+                        v-model="form.latitude" 
                         type="number"
                         step="0.000001"
-                        placeholder="例: 40.604">
+                        placeholder="例: 40.604000"
+                        @input="roundLatitude">
                 </div>
 
                 <div class="form-group">
                     <label>経度</label>
                     <input 
-                        v-model.number="form.longitude" 
+                        v-model="form.longitude" 
                         type="number"
                         step="0.000001"
-                        placeholder="例: 140.6235">
+                        placeholder="例: 140.623500"
+                        @input="roundLongitude">>
                 </div>
 
                 <div class="form-group">
@@ -254,7 +256,7 @@
                 <h3>ホーム画面に追加</h3>
                 <p class="menu-desc">iPhone でホーム画面に追加するとアプリのように使えます</p>
                 <button @click="showInstallPrompt" class="btn btn-primary menu-btn">
-                    📱 ホーム画面に追加
+                    📱 インストール
                 </button>
                 <p class="menu-hint">Safari の共有 → "ホーム画面に追加" をタップ</p>
             </div>
@@ -276,7 +278,7 @@
                     class="file-input menu-input"
                     id="import-file">
                 <label for="import-file" class="btn btn-secondary menu-btn" style="display: block; text-align: center;">
-                    📥 インポート
+                    📥 ファイルを選択
                 </label>
                 <p class="menu-hint">バックアップファイルを選択して復元</p>
             </div>
