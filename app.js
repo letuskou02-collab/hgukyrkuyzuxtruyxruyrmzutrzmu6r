@@ -1,0 +1,1855 @@
+'use strict';
+
+// JST（UTC+9）の今日の日付を YYYY-MM-DD で返す
+function todayJST() {
+  const d = new Date(Date.now() + 9 * 60 * 60 * 1000);
+  return d.toISOString().slice(0, 10);
+}
+
+// === 定数 ===
+const STORAGE_KEY = 'kokudo_sticker_data';
+const IDB_NAME = 'kokudo_photos';
+const IDB_STORE = 'photos';
+const IDB_VERSION = 1;
+
+// === IndexedDB 管理 ===
+let _idb = null;
+function openIDB() {
+  if (_idb) return Promise.resolve(_idb);
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, IDB_VERSION);
+    req.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains(IDB_STORE)) {
+        db.createObjectStore(IDB_STORE, { keyPath: 'routeId' });
+      }
+    };
+    req.onsuccess = (e) => { _idb = e.target.result; resolve(_idb); };
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbGetPhotos(routeId) {
+  try {
+    const db = await openIDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(IDB_STORE, 'readonly');
+      const req = tx.objectStore(IDB_STORE).get(routeId);
+      req.onsuccess = () => resolve(req.result ? req.result.photos : []);
+      req.onerror = () => resolve([]);
+    });
+  } catch { return []; }
+}
+async function idbSetPhotos(routeId, photos) {
+  try {
+    const db = await openIDB();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      tx.objectStore(IDB_STORE).put({ routeId, photos });
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch (e) { console.error('idbSetPhotos error', e); }
+}
+async function idbDeletePhotos(routeId) {
+  try {
+    const db = await openIDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      tx.objectStore(IDB_STORE).delete(routeId);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    });
+  } catch { }
+}
+async function idbGetAllPhotos() {
+  try {
+    const db = await openIDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(IDB_STORE, 'readonly');
+      const req = tx.objectStore(IDB_STORE).getAll();
+      req.onsuccess = () => resolve(req.result || []);
+      req.onerror = () => resolve([]);
+    });
+  } catch { return []; }
+}
+const REGIONS = ['北海道','東北','関東','中部','北陸','近畿','中国','四国','九州','沖縄'];
+
+// === 状態 ===
+let collectedData = {};
+let currentFilter = 'all';
+let currentRegions = [];
+let currentTypes = [];
+let currentSort = 'number-asc';
+let gallerySortOrder = 'date-desc';
+let searchQuery = '';
+let isListView = false;
+let activeModalId = null;
+let currentPhotos = [];
+let tapTimers = {};
+let currentView = 'home';
+let mapInstance = null;
+
+// === データ管理 ===
+function loadData() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    collectedData = raw ? JSON.parse(raw) : {};
+  } catch (e) { collectedData = {}; }
+}
+
+// 既存localStorageのphotosデータをIndexedDBへ移行（初回のみ）
+async function migratePhotosToIDB() {
+  const MIGRATED_KEY = 'kokudo_photos_migrated';
+  if (localStorage.getItem(MIGRATED_KEY)) return;
+  let migrated = 0;
+  const tasks = Object.keys(collectedData).map(async id => {
+    const photos = collectedData[id].photos;
+    if (Array.isArray(photos) && photos.length > 0) {
+      await idbSetPhotos(Number(id), photos);
+      migrated++;
+    }
+  });
+  await Promise.all(tasks);
+  if (migrated > 0) {
+    showToast(`📦 写真${migrated}件をIndexedDBに移行しました`, 'success');
+  }
+  localStorage.setItem(MIGRATED_KEY, '1');
+  // localStorageからphotosを削除して保存し直す
+  saveData();
+}
+function saveData() {
+  // photosはIndexedDBで管理するためlocalStorageからは除外
+  const dataToSave = {};
+  Object.keys(collectedData).forEach(id => {
+    const { photos, ...rest } = collectedData[id];
+    dataToSave[id] = rest;
+  });
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(dataToSave));
+  } catch (e) {
+    console.error('saveData error', e);
+  }
+}
+function getRouteData(id) {
+  // photosはIndexedDBで管理するため常に[]（表示時に別途取得）
+  const d = collectedData[id] || {};
+  return { collected: false, memo: '', date: null, location: '', lat: null, lng: null, ...d, photos: [] };
+}
+function setRouteData(id, patch) {
+  collectedData[id] = { ...getRouteData(id), ...patch };
+  saveData();
+}
+
+// === トースト ===
+let toastTimer;
+function showToast(msg, type = 'default') {
+  const t = document.getElementById('toast');
+  clearTimeout(toastTimer);
+  t.textContent = msg;
+  t.className = 'toast show ' + type;
+  toastTimer = setTimeout(() => { t.className = 'toast'; }, 2200);
+}
+
+// 都道府県の五十音順インデックス
+const PREF_ORDER = ['北海道','青森','岩手','宮城','秋田','山形','福島','茨城','栃木','群馬','埼玉','千葉','東京','神奈川','新潟','富山','石川','福井','山梨','長野','岐阜','静岡','愛知','三重','滋賀','京都','大阪','兵庫','奈良','和歌山','鳥取','島根','岡山','広島','山口','徳島','香川','愛媛','高知','福岡','佐賀','長崎','熊本','大分','宮崎','鹿児島','沖縄'];
+
+function getPrefOrder(route) {
+  const from = route.from || '';
+  const idx = PREF_ORDER.findIndex(p => from.includes(p));
+  return idx === -1 ? 99 : idx;
+}
+
+function getSortedRoutes(routes) {
+  const arr = [...routes];
+  switch (currentSort) {
+    case 'number-asc':
+      return arr.sort((a, b) => a.id - b.id);
+    case 'number-desc':
+      return arr.sort((a, b) => b.id - a.id);
+    case 'date-desc':
+      return arr.sort((a, b) => {
+        const da = getRouteData(a.id).date || '';
+        const db = getRouteData(b.id).date || '';
+        if (db !== da) return db.localeCompare(da);
+        return a.id - b.id;
+      });
+    case 'date-asc':
+      return arr.sort((a, b) => {
+        const da = getRouteData(a.id).date || '';
+        const db = getRouteData(b.id).date || '';
+        if (da !== db) return da.localeCompare(db);
+        return a.id - b.id;
+      });
+    case 'pref-asc':
+      return arr.sort((a, b) => {
+        const pa = getPrefOrder(a);
+        const pb = getPrefOrder(b);
+        if (pa !== pb) return pa - pb;
+        return a.id - b.id;
+      });
+    default:
+      return arr;
+  }
+}
+
+// === フィルタ ===
+function getFilteredRoutes() {
+  const filtered = KOKUDO_ROUTES.filter((r) => {
+    const d = getRouteData(r.id);
+    if (currentFilter === 'collected' && !d.collected) return false;
+    if (currentFilter === 'not-collected' && d.collected) return false;
+    if (currentRegions.length && !currentRegions.includes(r.region)) return false;
+    if (currentTypes.length && !currentTypes.includes(r.type)) return false;
+    if (searchQuery) {
+      const q = searchQuery.toLowerCase();
+      if (!String(r.id).includes(q) && !r.region.includes(q) && !r.from.includes(q) && !r.to.includes(q)) return false;
+    }
+    return true;
+  });
+  return getSortedRoutes(filtered);
+}
+
+// === 統計更新 ===
+function updateStats() {
+  const total = KOKUDO_ROUTES.length;
+  const collected = KOKUDO_ROUTES.filter(r => getRouteData(r.id).collected).length;
+  const pct = total > 0 ? Math.round(collected / total * 100) : 0;
+  document.getElementById('stat-collected').textContent = collected;
+  document.getElementById('stat-total').textContent = total;
+  document.getElementById('stat-pct').textContent = pct + '%';
+  document.getElementById('progress-bar').style.width = pct + '%';
+}
+
+// === 地方サマリー ===
+function buildRegionSummary() {
+  const container = document.getElementById('region-cards');
+  container.innerHTML = '';
+  REGIONS.forEach(region => {
+    const routes = KOKUDO_ROUTES.filter(r => r.region.includes(region));
+    if (routes.length === 0) return;
+    const done = routes.filter(r => getRouteData(r.id).collected).length;
+    const pct = Math.round(done / routes.length * 100);
+    const card = document.createElement('div');
+    card.className = 'region-card' + (currentRegions.includes(region) ? ' active' : '');
+    card.innerHTML = `
+      <div class="r-name">${region}</div>
+      <div class="r-count">${done}/${routes.length}</div>
+      <div class="r-bar"><div class="r-bar-fill" style="width:${pct}%"></div></div>
+    `;
+    card.addEventListener('click', () => {
+      const ri = currentRegions.indexOf(region);
+      if (ri >= 0) currentRegions.splice(ri, 1); else currentRegions.push(region);
+      switchView('list');
+    });
+    container.appendChild(card);
+  });
+}
+
+// === 最近の取得 ===
+function buildRecentList() {
+  const container = document.getElementById('recent-list');
+  const items = Object.entries(collectedData)
+    .filter(([, d]) => d.collected && d.date)
+    .sort((a, b) => (b[1].date || '').localeCompare(a[1].date || ''))
+    .slice(0, 2);
+
+  if (items.length === 0) {
+    container.innerHTML = '<p class="recent-empty">まだ取得記録がありません</p>';
+    return;
+  }
+  container.innerHTML = '';
+  items.forEach(([id, d]) => {
+    const route = KOKUDO_ROUTES.find(r => r.id === parseInt(id));
+    if (!route) return;
+    const row = document.createElement('div');
+    row.className = 'recent-row';
+    row.innerHTML = `
+      <div class="recent-num">${id}号</div>
+      <div class="recent-body">
+        <div class="recent-name">${route.region}　${route.from}→${route.to}</div>
+        ${d.location ? `<div class="recent-meta">📍 ${d.location}</div>` : ''}
+        <div class="recent-meta">📅 ${d.date}</div>
+      </div>
+    `;
+    row.addEventListener('click', () => openDetail(parseInt(id)));
+    container.appendChild(row);
+  });
+}
+
+// === ルートカード ===
+function createRouteCard(route) {
+  const d = getRouteData(route.id);
+  const card = document.createElement('div');
+  card.className = 'route-card' + (d.collected ? ' collected' : '');
+  card.dataset.id = route.id;
+
+  if (isListView) {
+    card.innerHTML = `
+      <div class="route-num">${route.id}号</div>
+      <div class="route-info">
+        <div class="route-label">${route.region}</div>
+        <div class="route-path">${route.from} → ${route.to}</div>
+      </div>
+    `;
+  } else {
+    card.innerHTML = `
+      <div class="route-num">${route.id}</div>
+      <div class="route-label">号</div>
+    `;
+    card.addEventListener('touchstart', (e) => {
+      const t = e.touches[0];
+      card._touchStartX = t.clientX;
+      card._touchStartY = t.clientY;
+    }, { passive: true });
+    card.addEventListener('touchend', (e) => {
+      const id = route.id;
+      const t = e.changedTouches[0];
+      const dx = Math.abs(t.clientX - (card._touchStartX || 0));
+      const dy = Math.abs(t.clientY - (card._touchStartY || 0));
+      // 10px以上動いていたらスクロールとみなしてタップ判定しない
+      if (dx > 10 || dy > 10) return;
+      if (tapTimers[id]) {
+        clearTimeout(tapTimers[id]);
+        delete tapTimers[id];
+        e.preventDefault();
+        quickToggle(id, card);
+      } else {
+        tapTimers[id] = setTimeout(() => { delete tapTimers[id]; openDetail(id); }, 280);
+      }
+    });
+  }
+  card.addEventListener('click', (e) => { if (e.defaultPrevented) return; openDetail(route.id); });
+  return card;
+}
+
+// === クイックトグル ===
+function quickToggle(id, card) {
+  const d = getRouteData(id);
+  const newVal = !d.collected;
+  setRouteData(id, { collected: newVal, date: newVal ? todayJST() : null });
+  card.classList.toggle('collected', newVal);
+  updateStats();
+  buildRegionSummary();
+  buildRecentList();
+  showToast(newVal ? `国道${id}号 ✓ 取得済みに設定` : `国道${id}号 未取得に戻しました`, newVal ? 'success' : 'default');
+}
+
+// === ルート一覧レンダリング ===
+function renderRoutes() {
+  const container = document.getElementById('routes-container');
+  const filtered = getFilteredRoutes();
+  container.className = isListView ? 'routes-list' : 'routes-grid';
+  container.innerHTML = '';
+  if (filtered.length === 0) {
+    container.innerHTML = '<div class="empty-state"><span>🔍</span><br>該当する国道が見つかりません</div>';
+    return;
+  }
+  const frag = document.createDocumentFragment();
+  filtered.forEach(r => frag.appendChild(createRouteCard(r)));
+  container.appendChild(frag);
+  document.getElementById('section-count').textContent = `${filtered.length}件`;
+}
+
+// === 一覧（2列メディアカード） ===
+function buildGallery() {
+  const q = (document.getElementById('gallery-search-input')?.value || '').trim();
+  const container = document.getElementById('gallery-container');
+  container.innerHTML = '';
+
+  // 取得済みのみ
+  let items = KOKUDO_ROUTES.filter(r => getRouteData(r.id).collected);
+
+  // ソート
+  switch (gallerySortOrder) {
+    case 'date-desc':
+      items.sort((a, b) => {
+        const da = getRouteData(a.id).date || '';
+        const db = getRouteData(b.id).date || '';
+        return db.localeCompare(da) || a.id - b.id;
+      });
+      break;
+    case 'date-asc':
+      items.sort((a, b) => {
+        const da = getRouteData(a.id).date || '';
+        const db = getRouteData(b.id).date || '';
+        return da.localeCompare(db) || a.id - b.id;
+      });
+      break;
+    case 'number-asc':
+      items.sort((a, b) => a.id - b.id);
+      break;
+    case 'number-desc':
+      items.sort((a, b) => b.id - a.id);
+      break;
+    case 'pref-asc':
+      items.sort((a, b) => {
+        const pa = getPrefOrder(a);
+        const pb = getPrefOrder(b);
+        return pa !== pb ? pa - pb : a.id - b.id;
+      });
+      break;
+  }
+
+  // 番号検索
+  if (q !== '') {
+    items = items.filter(r => String(r.id).includes(q));
+  }
+
+  if (items.length === 0) {
+    container.innerHTML = '<div class="gallery-empty"><span>📸</span><br>まだ取得記録がありません</div>';
+    return;
+  }
+
+  items.forEach(route => {
+    const d = getRouteData(route.id);
+    const card = document.createElement('div');
+    card.className = 'gallery-card';
+
+    const signUrl = getRouteSignUrl(route.id);
+    // サムネイルは先に標識画像またはプレースホルダーで表示
+    const thumbPlaceholder = signUrl
+      ? `<div class="gallery-thumb sign-thumb"><img src="${signUrl}" alt="国道${route.id}号標識" /></div>`
+      : `<div class="gallery-thumb no-photo"><span>📸</span></div>`;
+
+    card.innerHTML = `
+      <div class="gallery-thumb-wrap" data-route-id="${route.id}">${thumbPlaceholder}</div>
+      <div class="gallery-info">
+        <div class="gallery-num">${route.id}号</div>
+        <div class="gallery-region">${route.region}</div>
+        ${d.location ? `<div class="gallery-location">📍 ${d.location}</div>` : ''}
+        ${d.date ? `<div class="gallery-date">📅 ${d.date}</div>` : ''}
+      </div>
+    `;
+    card.addEventListener('click', () => openGalleryDetail(route.id));
+    container.appendChild(card);
+
+    // sign-thumb の img にリトライを設定
+    if (signUrl) {
+      const signImg = card.querySelector('.sign-thumb img');
+      if (signImg) _retryImg(signImg, signUrl);
+    }
+
+    // 写真をIndexedDBから非同期ロードしてサムネイルを差し替え
+    idbGetPhotos(route.id).then(photos => {
+      if (photos && photos.length > 0) {
+        const wrap = card.querySelector('.gallery-thumb-wrap');
+        if (wrap) wrap.innerHTML = `<div class="gallery-thumb"><img src="${photos[0]}" alt="国道${route.id}号" loading="lazy" /></div>`;
+      }
+    });
+  });
+}
+
+// === 全体レンダリング ===
+function renderAll() {
+  updateStats();
+  buildRegionSummary();
+  buildRecentList();
+  buildGallery();
+  renderRoutes();
+}
+
+// === モーダル ===
+// === 国道詳細シート ===
+let activeDetailId = null;
+let _reopenDetailId = null; // detail-edit-btnから開いた場合に詳細シートを再表示するID
+
+// Wikimedia画像リトライヘルパー（ネットワーク不安定時に最大3回リトライ）
+function _retryImg(img, url, maxRetry = 6, delay = 1500) {
+  let attempts = 0;
+  img.onerror = () => {
+    if (attempts < maxRetry) {
+      attempts++;
+      setTimeout(() => {
+        img.src = url + '?r=' + attempts; // キャッシュバスト
+      }, delay * attempts);
+    }
+  };
+  img.src = url;
+}
+
+
+
+function openDetail(id) {
+  const route = KOKUDO_ROUTES.find(r => r.id === id);
+  if (!route) return;
+  activeDetailId = id;
+
+  const d = getRouteData(id);
+  const collected = !!d.collected;
+
+  // バッジ・タイトル
+  const badge = document.getElementById('detail-route-badge');
+  const _signUrl = getRouteSignUrl(id);
+  if (_signUrl) {
+    badge.innerHTML = `<img alt="国道${id}号標識" style="width:100%;height:100%;object-fit:contain;" />`;
+    badge.className = 'detail-route-badge sign-img' + (collected ? ' collected' : '');
+    _retryImg(badge.querySelector('img'), _signUrl);
+  } else {
+    badge.innerHTML = id;
+    badge.className = 'detail-route-badge' + (collected ? ' collected' : '');
+  }
+  document.getElementById('detail-route-num').textContent = `国道${id}号`;
+  document.getElementById('detail-route-type').textContent =
+    `${route.region}　／　${route.type}国道`;
+
+  // 路線情報（まず routes.js の値で表示、Wiki取得後に更新）
+  document.getElementById('detail-from').textContent = route.from;
+  document.getElementById('detail-to').textContent = route.to;
+  document.getElementById('detail-region').textContent = route.region;
+  document.getElementById('detail-length').textContent = '取得中…';
+  document.getElementById('detail-length').className = 'detail-info-value loading';
+
+  // 取得状況
+  _updateDetailStatus(id, d);
+
+  // Wikipedia infobox から起点・終点・延長・概要（非同期）
+  const wikiSec = document.getElementById('detail-wiki-section');
+  const wikiText = document.getElementById('detail-wiki-text');
+  const wikiLink = document.getElementById('detail-wiki-link');
+  wikiSec.style.display = 'none';
+  wikiText.textContent = '';
+  wikiText.classList.remove('expanded');
+  fetchRouteWikiInfoWithRetry(id, (info) => {
+    // 起点・終点：Wikiの詳細があれば上書き
+    if (info.from) document.getElementById('detail-from').textContent = info.from;
+    if (info.to)   document.getElementById('detail-to').textContent   = info.to;
+    if (info.length) {
+      const el = document.getElementById('detail-length');
+      el.textContent = info.length;
+      el.className = 'detail-info-value';
+    } else {
+      const el = document.getElementById('detail-length');
+      el.textContent = '—';
+      el.className = 'detail-info-value';
+    }
+    if (info.extract) {
+      wikiText.textContent = info.extract;
+      wikiLink.href = `https://ja.wikipedia.org/wiki/国道${id}号`;
+      wikiSec.style.display = 'block';
+      wikiText.addEventListener('click', () => wikiText.classList.toggle('expanded'), { once: false });
+    }
+  }, () => {
+    const el = document.getElementById('detail-length');
+    el.textContent = '—';
+    el.className = 'detail-info-value';
+  });
+
+  document.getElementById('detail-overlay').classList.add('open');
+}
+
+function _updateDetailStatus(id, d) {
+  const badge = document.getElementById('detail-status-badge');
+  const meta = document.getElementById('detail-status-meta');
+  const toggleBtn = document.getElementById('detail-toggle-btn');
+
+  if (d.collected) {
+    badge.textContent = '✓ 取得済み';
+    badge.className = 'detail-status-badge collected';
+    const parts = [];
+    if (d.date) parts.push(`📅 ${d.date}`);
+    if (d.location) parts.push(`📍 ${d.location}`);
+    meta.innerHTML = parts.join('<br>');
+    toggleBtn.textContent = '取得済みを解除';
+    toggleBtn.className = 'detail-action-btn detail-action-toggle active';
+  } else {
+    badge.textContent = '未取得';
+    badge.className = 'detail-status-badge';
+    meta.textContent = '';
+    toggleBtn.textContent = '○ 取得済みにする';
+    toggleBtn.className = 'detail-action-btn detail-action-toggle';
+  }
+}
+
+function closeDetail() {
+  document.getElementById('detail-overlay').classList.remove('open');
+  activeDetailId = null;
+}
+
+// === 一覧用詳細シート（表示専用） ===
+let activeGalleryDetailId = null;
+
+function openGalleryDetail(id) {
+  const route = KOKUDO_ROUTES.find(r => r.id === id);
+  if (!route) return;
+  activeGalleryDetailId = id;
+
+  const d = getRouteData(id);
+  const collected = !!d.collected;
+
+  // バッジ・タイトル
+  const badge = document.getElementById('gd-route-badge');
+  const _signUrl = getRouteSignUrl(id);
+  if (_signUrl) {
+    badge.innerHTML = `<img alt="国道${id}号標識" style="width:100%;height:100%;object-fit:contain;" />`;
+    badge.className = 'detail-route-badge sign-img' + (collected ? ' collected' : '');
+    _retryImg(badge.querySelector('img'), _signUrl);
+  } else {
+    badge.innerHTML = id;
+    badge.className = 'detail-route-badge' + (collected ? ' collected' : '');
+  }
+  document.getElementById('gd-route-num').textContent = `国道${id}号`;
+  document.getElementById('gd-route-type').textContent = `${route.region}　／　${route.type}国道`;
+
+  // 路線情報（routes.jsの値で初期表示）
+  document.getElementById('gd-from').textContent = route.from;
+  document.getElementById('gd-to').textContent = route.to;
+  document.getElementById('gd-region').textContent = route.region;
+  document.getElementById('gd-length').textContent = '取得中…';
+  document.getElementById('gd-length').className = 'detail-info-value loading';
+
+
+
+  // Wikipedia情報（非同期）
+  const wikiSec = document.getElementById('gd-wiki-section');
+  const wikiText = document.getElementById('gd-wiki-text');
+  const wikiLink = document.getElementById('gd-wiki-link');
+  wikiSec.style.display = 'none';
+  wikiText.textContent = '';
+  wikiText.classList.remove('expanded');
+  fetchRouteWikiInfoWithRetry(id, (info) => {
+    if (info.from) document.getElementById('gd-from').textContent = info.from;
+    if (info.to)   document.getElementById('gd-to').textContent   = info.to;
+    const lenEl = document.getElementById('gd-length');
+    lenEl.textContent = info.length || '—';
+    lenEl.className = 'detail-info-value';
+    if (info.extract) {
+      wikiText.textContent = info.extract;
+      wikiLink.href = `https://ja.wikipedia.org/wiki/国道${id}号`;
+      wikiSec.style.display = 'block';
+      wikiText.addEventListener('click', () => wikiText.classList.toggle('expanded'), { once: false });
+    }
+  }, () => {
+    const lenEl = document.getElementById('gd-length');
+    lenEl.textContent = '—';
+    lenEl.className = 'detail-info-value';
+  });
+
+  // 取得情報（日時・場所）
+  const collectedInfoEl = document.getElementById('gd-collected-info');
+  if (collectedInfoEl) {
+    const rows = [];
+    if (d.date)     rows.push(`<div class="gd-info-row"><svg class="label-icon" viewBox="0 0 16 16" fill="none"><rect x="2" y="2" width="12" height="12" rx="2" fill="currentColor" opacity=".85"/><path d="M2 6h12" stroke="#fff" stroke-width="1"/><path d="M5 2v2M11 2v2" stroke="#fff" stroke-width="1.2" stroke-linecap="round"/><rect x="4.5" y="8" width="2" height="2" rx=".4" fill="#fff"/><rect x="7.5" y="8" width="2" height="2" rx=".4" fill="#fff"/></svg> <span>${d.date}</span></div>`);
+    if (d.location) {
+      const mapBtn = (d.lat != null && d.lng != null)
+        ? `<a class="gd-map-btn" href="#" data-lat="${d.lat}" data-lng="${d.lng}" data-label="${d.location}">🗺 地図で確認</a>`
+        : '';
+      rows.push(`<div class="gd-info-row gd-info-row-location"><svg class="label-icon" viewBox="0 0 16 16" fill="none"><path d="M8 1.5C5.51 1.5 3.5 3.51 3.5 6c0 3.75 4.5 8.5 4.5 8.5S12.5 9.75 12.5 6c0-2.49-2.01-4.5-4.5-4.5zm0 6.25A1.75 1.75 0 1 1 8 4a1.75 1.75 0 0 1 0 3.75z" fill="currentColor"/></svg> <span>${d.location}</span>${mapBtn}</div>`);
+    }
+    collectedInfoEl.innerHTML = rows.join('');
+    collectedInfoEl.style.display = rows.length ? 'block' : 'none';
+  }
+
+  // 写真: IndexedDBから非同期ロード
+  const photosSec = document.getElementById('gd-photos-section');
+  const photosGrid = document.getElementById('gd-photos-grid');
+  photosGrid.innerHTML = '';
+  photosSec.style.display = 'none';
+  idbGetPhotos(id).then(photos => {
+    if (photos && photos.length > 0) {
+      photosGrid.innerHTML = '';
+      photos.forEach(src => {
+        const img = document.createElement('img');
+        img.src = src;
+        img.className = 'gd-photo-thumb';
+        img.alt = `国道${id}号の写真`;
+        img.loading = 'lazy';
+        img.addEventListener('click', () => {
+          const ov = document.createElement('div');
+          ov.className = 'photo-zoom-overlay';
+          ov.style.cssText = 'position:fixed;inset:0;z-index:3000;background:rgba(0,0,0,0.9);display:flex;align-items:center;justify-content:center;';
+          const full = document.createElement('img');
+          full.src = src;
+          full.style.cssText = 'max-width:95vw;max-height:90dvh;border-radius:8px;object-fit:contain;';
+          ov.appendChild(full);
+          ov.addEventListener('click', () => document.body.removeChild(ov));
+          document.body.appendChild(ov);
+        });
+        photosGrid.appendChild(img);
+      });
+      photosSec.style.display = 'block';
+    }
+  });
+
+  document.getElementById('gallery-detail-overlay').classList.add('open');
+}
+
+function closeGalleryDetail() {
+  document.getElementById('gallery-detail-overlay').classList.remove('open');
+  activeGalleryDetailId = null;
+}
+
+// wikitextのマークアップを平文に変換
+function _cleanWikitext(s) {
+  for (let i = 0; i < 8; i++) {
+    const prev = s;
+    s = s.replace(/\[\[[^\[\]]*\|([^\[\]]*)\]\]/g, '$1'); // [[X|Y]] → Y
+    s = s.replace(/\[\[([^\[\]]*)\]\]/g, '$1');           // [[X]] → X
+    if (s === prev) break;
+  }
+  for (let i = 0; i < 5; i++) {
+    const prev = s;
+    s = s.replace(/\{\{[^{}]*\}\}/g, '');                  // {{...}} 除去
+    if (s === prev) break;
+  }
+  s = s.replace(/<br\s*\/?>/gi, ' ');
+  s = s.replace(/<[^>]+>/g, '');
+  s = s.replace(/（\s*）/g, '').replace(/\(\s*\)/g, '');
+  s = s.replace(/[\[\]{}]/g, '');
+  s = s.replace(/[ \t\u3000]+/g, ' ').trim();
+  s = s.replace(/\s*[（(]\s*$/, '').trim();
+  return s;
+}
+
+async function fetchRouteWikiInfo(routeId) {
+  try {
+    const title = encodeURIComponent(`国道${routeId}号`);
+
+    // wikitext（infobox）から起点・終点・総延長を取得
+    const revUrl = `https://ja.wikipedia.org/w/api.php?action=query&prop=revisions&rvprop=content&rvslots=main&redirects=1&titles=${title}&format=json&origin=*`;
+    const revRes = await fetch(revUrl);
+    if (!revRes.ok) return null;
+    const revData = await revRes.json();
+    const pages = revData?.query?.pages;
+    if (!pages) return null;
+    const page = Object.values(pages)[0];
+    if (!page || page.missing !== undefined) return null;
+    const wikitext = page?.revisions?.[0]?.slots?.main?.['*'] || '';
+
+    function extractField(field) {
+      const re = new RegExp(`\\|${field}\\s*=\\s*([\\s\\S]*?)(?=\\n\\s*\\||\\n\\n|$)`);
+      const m = wikitext.match(re);
+      return m ? _cleanWikitext(m[1].trim()) : null;
+    }
+
+    const from   = extractField('起点');
+    const to     = extractField('終点');
+    const rawLen = extractField('総延長');
+    let length = null;
+    if (rawLen) {
+      const rawLen2 = rawLen.replace(/キロメートル/g, 'km');
+      const lm = rawLen2.match(/([\d,]+(?:\.\d+)?)\s*km/);
+      if (lm) length = lm[1].replace(',', '') + ' km';
+    }
+
+    // 概要文（extracts API）
+    const extUrl = `https://ja.wikipedia.org/w/api.php?action=query&prop=extracts&exintro=1&explaintext=1&redirects=1&titles=${title}&format=json&origin=*`;
+    const extRes = await fetch(extUrl);
+    let extract = null;
+    if (extRes.ok) {
+      const extData = await extRes.json();
+      const extPage = Object.values(extData?.query?.pages || {})[0];
+      const raw = extPage?.extract || '';
+      const firstPara = raw.split(/\n\n+/)[0].trim();
+      if (firstPara.length > 20) extract = firstPara;
+    }
+
+    return { from, to, length, extract };
+  } catch {
+    return null;
+  }
+}
+
+// Wikipedia情報リトライラッパー（最大6回・指数バックオフ）
+function fetchRouteWikiInfoWithRetry(routeId, onSuccess, onFail, maxRetry = 6, delay = 1500) {
+  let attempts = 0;
+  function attempt() {
+    fetchRouteWikiInfo(routeId).then(info => {
+      if (info) {
+        onSuccess(info);
+      } else if (attempts < maxRetry) {
+        attempts++;
+        setTimeout(attempt, delay * attempts);
+      } else {
+        if (onFail) onFail();
+      }
+    }).catch(() => {
+      if (attempts < maxRetry) {
+        attempts++;
+        setTimeout(attempt, delay * attempts);
+      } else {
+        if (onFail) onFail();
+      }
+    });
+  }
+  attempt();
+}
+
+function openModal(id) {
+  const route = KOKUDO_ROUTES.find(r => r.id === id);
+  if (!route) return;
+  activeModalId = id;
+  const d = getRouteData(id);
+
+  document.getElementById('modal-route-num').textContent = `国道${id}号`;
+  document.getElementById('modal-route-region').textContent = `${route.region} ／ ${route.type}国道`;
+  document.getElementById('modal-route-from').textContent = route.from;
+  document.getElementById('modal-route-to').textContent = route.to;
+
+  const btn = document.getElementById('collect-toggle-btn');
+  btn.textContent = d.collected ? '✓ 取得済み' : '○ 取得済みにする';
+  btn.className = 'collect-toggle' + (d.collected ? ' active' : '');
+
+  document.getElementById('modal-memo-input').value = d.memo || '';
+  const _dateRow = document.getElementById('modal-date-row');
+  const _dateInput = document.getElementById('modal-date-input');
+  if (d.collected) {
+    _dateRow.style.display = '';
+    _dateInput.value = d.date || '';
+  } else {
+    _dateRow.style.display = 'none';
+    _dateInput.value = '';
+  }
+  document.getElementById('modal-location-input').value = d.location || '';
+  document.getElementById('modal-lat-input').value = (d.lat != null) ? d.lat : '';
+  document.getElementById('modal-lng-input').value = (d.lng != null) ? d.lng : '';
+  updateMapLink(d.lat, d.lng);
+  hideCandidates(); // 前回の検索候補をクリア
+  // IndexedDBから写真を非同期ロード
+  currentPhotos = [];
+  renderPhotoGrid();
+  idbGetPhotos(id).then(photos => {
+    currentPhotos = Array.isArray(photos) ? [...photos] : [];
+    renderPhotoGrid();
+    // 写真ロード後もスクロール位置をトップに戻す
+    const _s = document.querySelector('.modal-sheet');
+    if (_s) _s.scrollTop = 0;
+  });
+
+  document.getElementById('modal-overlay').classList.add('open');
+  // slideUpアニメーション(0.25s)完了後にスクロールをトップにリセット
+  setTimeout(() => {
+    const _sheet = document.querySelector('.modal-sheet');
+    if (_sheet) _sheet.scrollTop = 0;
+  }, 260);
+  const _rc = document.getElementById('routes-container');
+  if (_rc) _rc.style.overflow = 'hidden';
+  document.querySelector('.bottom-tab-bar').style.display = 'none';
+}
+
+function closeModal(save = true) {
+  if (activeModalId !== null && save) {
+    const memo = document.getElementById('modal-memo-input').value;
+    const location = document.getElementById('modal-location-input').value.trim();
+    const latVal = document.getElementById('modal-lat-input').value;
+    const lngVal = document.getElementById('modal-lng-input').value;
+    const lat = latVal !== '' ? parseFloat(latVal) : null;
+    const lng = lngVal !== '' ? parseFloat(lngVal) : null;
+    const d = getRouteData(activeModalId);
+    if (d.collected) {
+      const dateVal = document.getElementById('modal-date-input').value || d.date || null;
+      setRouteData(activeModalId, { date: dateVal });
+    }
+    setRouteData(activeModalId, { memo, location, lat, lng });
+    // 写真はIndexedDBに保存（localStorage容量を使わない）
+    idbSetPhotos(activeModalId, currentPhotos).then(() => {
+      renderAll();
+      if (activeGalleryDetailId !== null) {
+        openGalleryDetail(activeGalleryDetailId);
+      }
+    });
+  }
+  const _overlayEl = document.getElementById('modal-overlay');
+  _overlayEl.classList.remove('open');
+  activeModalId = null;
+  const _rc2 = document.getElementById('routes-container');
+  if (_rc2) _rc2.style.overflow = '';
+  document.querySelector('.bottom-tab-bar').style.display = '';
+  if (_reopenDetailId !== null) {
+    const _rid = _reopenDetailId;
+    _reopenDetailId = null;
+    setTimeout(() => openDetail(_rid), 50);
+  }
+}
+
+// === エクスポート / インポート / リセット ===
+// === ローディング表示 ===
+function showLoading() {
+  const el = document.getElementById('loading-overlay');
+  el.classList.remove('hidden', 'fade-out');
+  // 「hidden」解除後にクラス変更を適用させるためrAFを挿む
+  requestAnimationFrame(() => {
+    el.classList.add('active');
+  });
+}
+function hideLoading() {
+  const el = document.getElementById('loading-overlay');
+  el.classList.add('fade-out');
+  el.classList.remove('active');
+  el.addEventListener('transitionend', () => {
+    el.classList.add('hidden');
+    el.classList.remove('fade-out');
+  }, { once: true });
+}
+
+async function exportData() {
+  showLoading();
+  try {
+    // collectedDataをコピーしてIndexedDBの写真を埋め込む
+    const allPhotos = await idbGetAllPhotos(); // [{id, photos:[base64,...]}, ...]
+    const photoMap = {};
+    for (const entry of allPhotos) {
+      if (entry.photos && entry.photos.length > 0) {
+        photoMap[entry.id] = entry.photos;
+      }
+    }
+    const exportObj = {};
+    for (const [id, data] of Object.entries(collectedData)) {
+      exportObj[id] = { ...data };
+      if (photoMap[Number(id)]) {
+        exportObj[id].photos = photoMap[Number(id)];
+      }
+    }
+    const json = JSON.stringify(exportObj, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `kokudo-sticker-${todayJST()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+    hideLoading();
+    showToast('エクスポートしました（写真込み）', 'success');
+  } catch (e) {
+    hideLoading();
+    showToast('エクスポートに失敗しました', 'error');
+  }
+}
+let _importPending = null; // 選択ダイアログ中に保持するパース済みデータ
+
+function importData() {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.json,application/json';
+  input.onchange = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const parsed = JSON.parse(ev.target.result);
+        // 簡易バリデーション：オブジェクトかどうか
+        if (typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('invalid');
+        _importPending = parsed;
+        openImportModal();
+      } catch { showToast('ファイルの読み込みに失敗しました', 'error'); }
+    };
+    reader.readAsText(file);
+  };
+  input.click();
+}
+
+function openImportModal() {
+  document.getElementById('import-modal-overlay').classList.add('open');
+}
+function closeImportModal() {
+  document.getElementById('import-modal-overlay').classList.remove('open');
+  _importPending = null;
+}
+
+function applyImportMerge() {
+  if (!_importPending) return;
+  const incoming = _importPending;
+  // 国道IDごとにマージ：各フィールドを既存優先でマージ
+  // collected: どちらかがtrueなら true（取得済み情報を失わない）
+  // 他フィールド: 既存が空なら incoming の値を採用
+  let added = 0, updated = 0;
+  for (const id of Object.keys(incoming)) {
+    const cur = collectedData[id];
+    const inc = incoming[id];
+    if (!cur) {
+      // 既存にない → そのまま追加（photosはIndexedDB管理）
+      const { photos: incPhotos, ...incRest } = inc;
+      collectedData[id] = incRest;
+      if (incPhotos && incPhotos.length > 0) {
+        idbSetPhotos(Number(id), incPhotos);
+      }
+      if (inc.collected) added++;
+    } else {
+      // 既存あり → フィールドごとにマージ
+      const merged = { ...cur };
+      // collected: どちらかがtrueなら true
+      if (inc.collected && !cur.collected) { merged.collected = true; updated++; }
+      // memo: 既存が空なら incoming を採用
+      if (!cur.memo && inc.memo) merged.memo = inc.memo;
+      // date: 既存が空なら incoming を採用
+      if (!cur.date && inc.date) merged.date = inc.date;
+      // location: 既存が空なら incoming を採用
+      if (!cur.location && inc.location) merged.location = inc.location;
+      // lat/lng: 既存が未設定なら incoming を採用
+      if ((cur.lat == null) && inc.lat != null) { merged.lat = inc.lat; merged.lng = inc.lng; }
+      collectedData[id] = merged;
+    }
+  }
+  saveData(); renderAll();
+  closeImportModal();
+  const total = Object.keys(incoming).length;
+  showToast(`マージ完了（${total}件処理）`, 'success');
+}
+
+function applyImportOverwrite() {
+  if (!_importPending) return;
+  if (!confirm('現在のすべての記録が削除され、インポートデータに置き換えられます。よろしいですか？')) return;
+  const incoming = _importPending;
+  // photosをIndexedDBに保存し、collectedDataからは除外
+  for (const id of Object.keys(incoming)) {
+    const { photos, ...rest } = incoming[id] || {};
+    incoming[id] = rest;
+    if (photos && photos.length > 0) {
+      idbSetPhotos(Number(id), photos);
+    }
+  }
+  collectedData = incoming;
+  saveData(); renderAll();
+  closeImportModal();
+  showToast('インポートしました（上書き）', 'success');
+}
+function resetData() {
+  if (!confirm('すべての取得記録をリセットしますか？この操作は元に戻せません。')) return;
+  collectedData = {};
+  saveData(); renderAll();
+  showToast('データをリセットしました');
+}
+
+async function clearCache() {
+  if (!confirm('アプリのキャッシュを削除します。\n次回起動時に最新版を再取得します。\nよろしいですか？')) return;
+  try {
+    // Service Worker の登録を解除
+    if ('serviceWorker' in navigator) {
+      const regs = await navigator.serviceWorker.getRegistrations();
+      await Promise.all(regs.map(r => r.unregister()));
+    }
+    // キャッシュストレージを全削除
+    if ('caches' in window) {
+      const keys = await caches.keys();
+      await Promise.all(keys.map(k => caches.delete(k)));
+    }
+    showToast('キャッシュを削除しました。再起動します…', 'success');
+    setTimeout(() => window.location.reload(), 1200);
+  } catch (e) {
+    showToast('キャッシュの削除に失敗しました', 'error');
+  }
+}
+
+// コンビニ等チェーン名の略称→正式名 正規化テーブル
+const CHAIN_NORMALIZE = [
+  [/^セブン(?!イレブン)/, 'セブンイレブン'],
+  [/^ファミマ/, 'ファミリーマート'],
+  [/^ファミ(?!リーマート)/, 'ファミリーマート'],
+  [/^ロー(?!ソン)/, 'ローソン'],
+  [/^エネオス?/i, 'ENEOS'],
+  [/^マック$|^マクド$/, 'マクドナルド'],
+  [/^スタバ/, 'スターバックス'],
+  [/^ドンキ(?!ホーテ)/, 'ドン・キホーテ'],
+];
+
+function normalizeChainName(q) {
+  for (const [pat, replacement] of CHAIN_NORMALIZE) {
+    if (pat.test(q)) return q.replace(pat, replacement);
+  }
+  return q;
+}
+
+// === ジオコーディング ===
+async function geocodeLocation() {
+  const raw = document.getElementById('modal-location-input').value.trim();
+  if (!raw) { showToast('取得場所を入力してください', 'error'); return; }
+  const query = normalizeChainName(raw);
+  // 正規化で変わった場合は入力欄を更新（ユーザーに分かりやすく）
+  if (query !== raw) {
+    document.getElementById('modal-location-input').value = query;
+  }
+  const btn = document.getElementById('btn-geocode');
+  btn.textContent = '⏳'; btn.disabled = true;
+  hideCandidates();
+  try {
+    const candidates = await fetchCandidates(query);
+    if (candidates.length === 0) {
+      showToast('施設が見つかりませんでした', 'error');
+    } else if (candidates.length === 1) {
+      applyCandidate(candidates[0]);
+    } else {
+      showCandidates(candidates);
+    }
+  } catch { showToast('検索に失敗しました', 'error'); }
+  finally { btn.textContent = '🔍'; btn.disabled = false; }
+}
+
+async function fetchCandidates(query) {
+  const results = [];
+
+  // --- 1. 国土地理院 地名検索API（住所・地名専用。施設名クエリはスキップ）---
+  const _facilityWords = ['道の駅', 'SA', 'サービスエリア', 'IC', 'インターチェンジ',
+    'パーキング', '店', 'ホテル', 'マート', 'セブン', 'ローソン', 'ファミリー',
+    'エネオス', 'ENEOS', '出光', 'コスモ', 'ドライブイン'];
+  const _isAddressQuery = !_facilityWords.some(w => query.includes(w));
+  if (_isAddressQuery) {
+    try {
+      const gsiUrl = 'https://msearch.gsi.go.jp/address-search/AddressSearch?q=' + encodeURIComponent(query);
+      const gsiRes = await fetch(gsiUrl);
+      if (gsiRes.ok) {
+        const gsiData = await gsiRes.json();
+        gsiData.slice(0, 3).forEach(item => {
+          const coords = item.geometry?.coordinates;
+          if (coords) results.push({
+            label: item.properties?.title || query,
+            lat: Math.round(parseFloat(coords[1]) * 1000000) / 1000000,
+            lng: Math.round(parseFloat(coords[0]) * 1000000) / 1000000,
+            source: '地理院'
+          });
+        });
+      }
+    } catch {}
+  }
+
+  // --- 2. Nominatim（日本限定・複数バリアント） ---
+  // コンビニ・飲食・ガソリンスタンドなどのチェーン店キーワード
+  const CHAIN_KEYWORDS = [
+    'セブンイレブン', 'ローソン', 'ファミリーマート', 'ミニストップ',
+    'デイリーヤマザキ', 'ポプラ', 'スリーエフ', 'セイコーマート',
+    'エネオス', 'ENEOS', '出光', 'コスモ石油', '昭和シェル',
+    'すき家', '吉野家', '松屋', 'マクドナルド', 'モスバーガー', 'ケンタッキー',
+    'スターバックス', 'ドトール', 'コメダ', 'サイゼリヤ', 'ガスト', 'デニーズ',
+    'イオン', 'イトーヨーカドー', 'ドン・キホーテ',
+  ];
+  const isChain = CHAIN_KEYWORDS.some(k => query.includes(k));
+
+  const searchVariants = [query];
+
+  if (isChain) {
+    // チェーン店: 店舗名そのままを優先。「〇〇店」を末尾に付けたバリアントも追加
+    if (!query.endsWith('店') && !query.endsWith('号店')) {
+      searchVariants.push(query + '店');
+    }
+  } else {
+    // 道の駅・SA・IC 補完パターン
+    if (!query.includes('道の駅') && !query.includes('駅') && query.length <= 10) {
+      searchVariants.push('道の駅' + query);
+    }
+    if (!query.includes('SA') && !query.includes('サービスエリア') && query.length <= 8) {
+      searchVariants.push(query + 'サービスエリア');
+      searchVariants.push(query + 'SA');
+    }
+    if (!query.includes('道路') && !query.includes('IC') && query.length <= 8) {
+      searchVariants.push(query + 'インターチェンジ');
+    }
+    // 一般施設: 「〇〇店」も試す
+    if (query.length <= 12 && !query.endsWith('店')) {
+      searchVariants.push(query + '店');
+    }
+  }
+
+  let reqCount = 0;
+  for (const variant of searchVariants) {
+    if (results.length >= 5) break;
+    try {
+      const url = 'https://nominatim.openstreetmap.org/search?format=json&limit=3&countrycodes=jp&q='
+        + encodeURIComponent(variant);
+      if (reqCount > 0) await new Promise(r => setTimeout(r, 1000));
+      const res = await fetch(url, { headers: { 'Accept-Language': 'ja' } });
+      reqCount++;
+      if (!res.ok) continue;
+      const data = await res.json();
+      data.forEach(item => {
+        const lat = Math.round(parseFloat(item.lat) * 1000000) / 1000000;
+        const lng = Math.round(parseFloat(item.lon) * 1000000) / 1000000;
+        const isDup = results.some(r => Math.abs(r.lat - lat) < 0.001 && Math.abs(r.lng - lng) < 0.001);
+        if (!isDup) results.push({
+          label: item.display_name.split(',').slice(0, 2).join(' '),
+          lat, lng, source: 'OSM'
+        });
+      });
+    } catch {}
+  }
+
+  return results.slice(0, 5);
+}
+
+function applyCandidate(c) {
+  document.getElementById('modal-lat-input').value = c.lat;
+  document.getElementById('modal-lng-input').value = c.lng;
+  updateMapLink(c.lat, c.lng);
+  hideCandidates();
+  showToast(`📍 ${c.label}`, 'success');
+}
+
+function showCandidates(candidates) {
+  const box = document.getElementById('geocode-candidates');
+  box.innerHTML = '';
+  candidates.forEach(c => {
+    const btn = document.createElement('button');
+    btn.className = 'geocode-candidate-btn';
+    btn.innerHTML = `<span class="gc-label">${c.label}</span><span class="gc-source">${c.source}</span>`;
+    btn.addEventListener('click', () => applyCandidate(c));
+    box.appendChild(btn);
+  });
+  box.style.display = 'block';
+}
+
+function hideCandidates() {
+  const box = document.getElementById('geocode-candidates');
+  if (box) { box.style.display = 'none'; box.innerHTML = ''; }
+}
+
+function updateMapLink(lat, lng) {
+  const link = document.getElementById('modal-map-link');
+  if (lat != null && lng != null && !isNaN(lat) && !isNaN(lng)) {
+    link.href = `https://maps.google.com/maps?q=${lat},${lng}`;
+    link.style.display = 'inline';
+  } else {
+    link.style.display = 'none';
+  }
+}
+
+// === 写真 ===
+function addPhotos(files) {
+  const MAX = 500, QUALITY = 0.55;
+  const MAX_PHOTOS = 10;
+  if (currentPhotos.length >= MAX_PHOTOS) {
+    showToast(`写真は最大${MAX_PHOTOS}枚までです`, 'default');
+    return;
+  }
+  showLoading();
+  const fileArr = Array.from(files);
+  let done = 0;
+  fileArr.forEach(file => {
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        let w = img.width, h = img.height;
+        if (w > MAX || h > MAX) {
+          if (w > h) { h = Math.round(h * MAX / w); w = MAX; }
+          else { w = Math.round(w * MAX / h); h = MAX; }
+        }
+        canvas.width = w; canvas.height = h;
+        canvas.getContext('2d').drawImage(img, 0, 0, w, h);
+        currentPhotos.push(canvas.toDataURL('image/jpeg', QUALITY));
+        done++;
+        if (done === fileArr.length) {
+          hideLoading();
+          renderPhotoGrid();
+        }
+      };
+      img.src = ev.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+function renderPhotoGrid() {
+  const grid = document.getElementById('photo-grid');
+  grid.innerHTML = '';
+  currentPhotos.forEach((src, idx) => {
+    const wrap = document.createElement('div');
+    wrap.className = 'photo-thumb' + (idx === 0 && currentPhotos.length > 1 ? ' photo-thumb-cover' : '');
+
+    const img = document.createElement('img');
+    img.src = src; img.alt = `写真${idx+1}`; img.loading = 'lazy';
+    img.addEventListener('click', () => {
+      const ov = document.createElement('div');
+      ov.className = 'photo-zoom-overlay';
+      ov.style.cssText = 'position:fixed;inset:0;z-index:20000;background:rgba(0,0,0,0.85);display:flex;align-items:center;justify-content:center;';
+      const big = document.createElement('img');
+      big.src = src; big.style.cssText = 'max-width:92vw;max-height:92vh;border-radius:8px;';
+      ov.appendChild(big);
+      ov.addEventListener('click', () => document.body.removeChild(ov));
+      document.body.appendChild(ov);
+    });
+
+    // カバー選択UI（複数枚のとき表示）
+    if (currentPhotos.length > 1) {
+      if (idx === 0) {
+        const badge = document.createElement('div');
+        badge.className = 'photo-cover-badge';
+        badge.textContent = '表紙';
+        wrap.appendChild(badge);
+      } else {
+        const coverBtn = document.createElement('button');
+        coverBtn.className = 'photo-cover-btn';
+        coverBtn.title = '一覧の表紙にする';
+        coverBtn.textContent = '⭐';
+        coverBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          currentPhotos.splice(idx, 1);
+          currentPhotos.unshift(src);
+          renderPhotoGrid();
+          showToast('表紙の写真を変更しました', 'success');
+        });
+        wrap.appendChild(coverBtn);
+      }
+    }
+
+    const rm = document.createElement('button');
+    rm.className = 'photo-thumb-remove'; rm.textContent = '✕';
+    rm.addEventListener('click', (e) => {
+      e.stopPropagation();
+      currentPhotos.splice(idx, 1);
+      renderPhotoGrid();
+    });
+    wrap.appendChild(img); wrap.appendChild(rm);
+    grid.appendChild(wrap);
+  });
+  // 写真追加後にモーダルシートを最下部へスクロール
+  setTimeout(() => {
+    const sheet = document.querySelector('.modal-sheet');
+    if (sheet) sheet.scrollTop = sheet.scrollHeight;
+  }, 100);
+}
+
+// === ビュー切替 ===
+function switchView(view) {
+  // 拡大写真が開いていたら閉じる
+  document.querySelectorAll('.photo-zoom-overlay').forEach(el => el.remove());
+  // 詳細シートが開いていたら閉じる
+  if (document.getElementById('detail-overlay').classList.contains('open')) {
+    closeDetail();
+  }
+  if (document.getElementById('gallery-detail-overlay').classList.contains('open')) {
+    closeGalleryDetail();
+  }
+  currentView = view;
+  document.querySelectorAll('.view-page').forEach(el => el.style.display = 'none');
+  document.querySelectorAll('.tab-item').forEach(btn => btn.classList.toggle('active', btn.dataset.view === view));
+  const pageEl = document.getElementById('view-' + view);
+  pageEl.style.display = 'block';
+  // メニュー画面時はボトムタブを隠す
+  document.querySelector('.bottom-tab-bar').style.display = view === 'menu' ? 'none' : '';
+  if (view === 'home') {
+    // rAFを1回振った後に地図初期化（DOM描画完了を保証）
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => initHomeMap());
+    });
+  }
+  if (view === 'shop') {
+    const btn = document.getElementById('btn-open-shop');
+    if (btn && !btn._bound) {
+      btn._bound = true;
+      btn.addEventListener('click', () => {
+        window.open('https://vcountry.jp/kokudou/map/', '_blank');
+      });
+    }
+  }
+}
+
+// === 地図ピッカー ===
+let pickerMap = null;
+let pickerMarker = null;
+let pickerLatLng = null;
+
+function openMapPicker() {
+  const overlay = document.getElementById('map-picker-overlay');
+  overlay.style.display = 'flex';
+
+  // 現在の緯度経度があれば中心に、なければ日本全体
+  const curLat = parseFloat(document.getElementById('modal-lat-input').value);
+  const curLng = parseFloat(document.getElementById('modal-lng-input').value);
+  const hasCoords = !isNaN(curLat) && !isNaN(curLng);
+
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      if (!pickerMap) {
+        pickerMap = L.map('map-picker-container', { zoomControl: true });
+        L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png', {
+          attribution: '地理院タイル',
+          maxZoom: 18
+        }).addTo(pickerMap);
+
+        pickerMap.on('click', (e) => {
+          pickerLatLng = e.latlng;
+          if (pickerMarker) {
+            pickerMarker.setLatLng(e.latlng);
+          } else {
+            pickerMarker = L.marker(e.latlng, { draggable: true }).addTo(pickerMap);
+            pickerMarker.on('dragend', (ev) => {
+              pickerLatLng = ev.target.getLatLng();
+              updatePickerHint(pickerLatLng);
+            });
+          }
+          document.getElementById('map-picker-confirm').disabled = false;
+          updatePickerHint(e.latlng);
+        });
+      }
+      // 毎回 invalidateSize してタイルを正しく描画させる
+      pickerMap.invalidateSize({ animate: false });
+
+      setTimeout(() => {
+        if (hasCoords) {
+          pickerMap.setView([curLat, curLng], 13);
+          // 既存座標にマーカーを置く
+          pickerLatLng = L.latLng(curLat, curLng);
+          if (pickerMarker) {
+            pickerMarker.setLatLng(pickerLatLng);
+          } else {
+            pickerMarker = L.marker(pickerLatLng, { draggable: true }).addTo(pickerMap);
+            pickerMarker.on('dragend', (ev) => {
+              pickerLatLng = ev.target.getLatLng();
+              updatePickerHint(pickerLatLng);
+            });
+          }
+          document.getElementById('map-picker-confirm').disabled = false;
+          updatePickerHint(pickerLatLng);
+        } else {
+          pickerMap.setView([36.5, 137.0], 5);
+          pickerLatLng = null;
+          document.getElementById('map-picker-confirm').disabled = true;
+          document.getElementById('map-picker-hint').textContent = '地図をタップして場所を指定してください';
+        }
+      }, 50);
+    });
+  });
+}
+
+function updatePickerHint(latlng) {
+  const lat = latlng.lat.toFixed(6);
+  const lng = latlng.lng.toFixed(6);
+  document.getElementById('map-picker-hint').textContent = `📍 緯度: ${lat}　経度: ${lng}　（ドラッグで調整できます）`;
+}
+
+function gpsPickerLocation() {
+  if (!navigator.geolocation) {
+    showToast('位置情報が使用できません', 'error'); return;
+  }
+  const btn = document.getElementById('map-picker-gps');
+  btn.textContent = '⏳'; btn.disabled = true;
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      btn.textContent = '📍 現在地'; btn.disabled = false;
+      const latlng = L.latLng(pos.coords.latitude, pos.coords.longitude);
+      pickerLatLng = latlng;
+      pickerMap.setView(latlng, 15);
+      if (pickerMarker) {
+        pickerMarker.setLatLng(latlng);
+      } else {
+        pickerMarker = L.marker(latlng, { draggable: true }).addTo(pickerMap);
+        pickerMarker.on('dragend', (ev) => {
+          pickerLatLng = ev.target.getLatLng();
+          updatePickerHint(pickerLatLng);
+        });
+      }
+      document.getElementById('map-picker-confirm').disabled = false;
+      updatePickerHint(latlng);
+    },
+    (err) => {
+      btn.textContent = '📍 現在地'; btn.disabled = false;
+      showToast('現在地を取得できませんでした', 'error');
+    },
+    { enableHighAccuracy: true, timeout: 10000 }
+  );
+}
+
+function closeMapPicker() {
+  document.getElementById('map-picker-overlay').style.display = 'none';
+}
+
+// ---------- 地図ビューア ----------
+let viewerMap = null;
+let viewerMarker = null;
+
+function openMapViewer(lat, lng, label) {
+  const overlay = document.getElementById('map-viewer-overlay');
+  overlay.style.display = 'flex';
+  const titleEl = document.getElementById('map-viewer-title');
+  titleEl.textContent = label || '';
+
+  if (!viewerMap) {
+    viewerMap = L.map('map-viewer-container', { zoomControl: true });
+    L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png', {
+      attribution: '<a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank">国土地理院</a>',
+      maxZoom: 18
+    }).addTo(viewerMap);
+  }
+
+  setTimeout(() => {
+    viewerMap.invalidateSize();
+    viewerMap.setView([lat, lng], 17);
+    if (viewerMarker) viewerMarker.remove();
+    viewerMarker = L.marker([lat, lng]).addTo(viewerMap);
+  }, 60);
+}
+
+function closeMapViewer() {
+  document.getElementById('map-viewer-overlay').style.display = 'none';
+}
+// ---------- 地図ビューアここまで ----------
+
+
+function confirmMapPicker() {
+  if (!pickerLatLng) return;
+  const lat = parseFloat(pickerLatLng.lat.toFixed(6));
+  const lng = parseFloat(pickerLatLng.lng.toFixed(6));
+  document.getElementById('modal-lat-input').value = lat;
+  document.getElementById('modal-lng-input').value = lng;
+  updateMapLink(lat, lng);
+  closeMapPicker();
+}
+
+// === 地図 ===
+function initHomeMap() {
+  const container = document.getElementById('home-map-container');
+  if (!container) return;
+  if (!mapInstance) {
+    mapInstance = L.map(container, { zoomControl: true }).setView([36.5, 137.0], 5);
+    L.tileLayer('https://cyberjapandata.gsi.go.jp/xyz/std/{z}/{x}/{y}.png', {
+      attribution: '<a href="https://maps.gsi.go.jp/development/ichiran.html" target="_blank">地理院タイル</a>',
+      maxZoom: 18
+    }).addTo(mapInstance);
+    mapInstance._markerLayer = L.layerGroup().addTo(mapInstance);
+  } else {
+    mapInstance.invalidateSize({ animate: false });
+  }
+  mapInstance._markerLayer.clearLayers();
+
+  const pins = [];
+  Object.entries(collectedData).forEach(([id, d]) => {
+    if (!d.collected) return;
+    if (d.lat == null || d.lng == null) return;
+    const lat = parseFloat(d.lat), lng = parseFloat(d.lng);
+    if (isNaN(lat) || isNaN(lng)) return;
+    const route = KOKUDO_ROUTES.find(r => r.id === parseInt(id));
+    if (!route) return;
+    const signUrl = getRouteSignUrl(parseInt(id));
+    const icon = L.divIcon({
+      className: '',
+      html: signUrl
+        ? `<img src="${signUrl}" style="width:36px;height:36px;object-fit:contain;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.4));" onerror="if(!this._r)this._r=0;if(this._r<6){this._r++;var u=this.src.split('?')[0];setTimeout(()=>this.src=u+'?r='+this._r,1500*this._r);}" />`
+        : `<div style="background:#0055c8;color:white;font-size:10px;font-weight:700;border-radius:50%;width:28px;height:28px;display:flex;align-items:center;justify-content:center;border:2px solid white;box-shadow:0 2px 6px rgba(0,0,0,0.35);">${id}</div>`,
+      iconSize: [36, 36], iconAnchor: [18, 18]
+    });
+    const photoHtml = ''; // 写真はIndexedDB管理のため地図ポップアップでは非表示
+    const marker = L.marker([lat, lng], { icon }).addTo(mapInstance._markerLayer);
+    marker.bindPopup(
+      `<b>国道${id}号</b><br>` +
+      (d.location ? `📍 ${d.location}<br>` : '') +
+      (d.date ? `📅 ${d.date}<br>` : '') +
+      (d.memo ? `📝 ${d.memo}<br>` : '') +
+      photoHtml,
+      { maxWidth: 220 }
+    );
+    pins.push([lat, lng]);
+  });
+  if (pins.length === 1) mapInstance.setView(pins[0], 12);
+  else if (pins.length > 1) mapInstance.fitBounds(pins, { padding: [40, 40], maxZoom: 13 });
+}
+
+// === イベント設定 ===
+function setupEvents() {
+  // ボトムタブ
+  document.querySelectorAll('.tab-item').forEach(btn => {
+    btn.addEventListener('click', () => {
+      switchView(btn.dataset.view);
+    });
+  });
+
+  // 検索
+  document.getElementById('search-input').addEventListener('input', (e) => {
+    searchQuery = e.target.value.trim(); renderRoutes();
+  });
+
+  // ギャラリー検索
+  document.getElementById('gallery-search-input').addEventListener('input', () => buildGallery());
+  document.getElementById('gallery-sort-select').addEventListener('change', (e) => {
+    gallerySortOrder = e.target.value; buildGallery();
+  });
+
+  // フィルタタブ
+  document.querySelectorAll('.tab-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      currentFilter = btn.dataset.filter;
+      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+      renderRoutes();
+    });
+  });
+
+  // カスタムドロップダウン共通処理
+  function setupCustomSelect(wrapId, dropdownId, btnId, labelId, varSetter) {
+    const wrap = document.getElementById(wrapId);
+    const dropdown = document.getElementById(dropdownId);
+    const btn = document.getElementById(btnId);
+    const labelEl = document.getElementById(labelId);
+    const allCheckbox = dropdown.querySelector('input[value=""]');
+    const otherCheckboxes = Array.from(dropdown.querySelectorAll('input:not([value=""])'));
+
+    function updateLabel() {
+      if (allCheckbox.checked) {
+        labelEl.textContent = 'すべて';
+      } else {
+        const names = otherCheckboxes
+          .filter(cb => cb.checked)
+          .map(cb => cb.closest('label').textContent.trim());
+        labelEl.textContent = names.length ? names.join('・') : '未選択';
+      }
+    }
+
+    function updateFilter() {
+      if (allCheckbox.checked) {
+        varSetter([]);
+      } else {
+        varSetter(otherCheckboxes.filter(cb => cb.checked).map(cb => cb.value));
+      }
+      renderRoutes();
+    }
+
+    // 「すべて」チェック時：他を全部オフ
+    allCheckbox.addEventListener('change', () => {
+      if (!allCheckbox.checked) {
+        // 「すべて」を外そうとしても他が何も選ばれていなければ戻す
+        if (otherCheckboxes.every(c => !c.checked)) {
+          allCheckbox.checked = true;
+        }
+      } else {
+        otherCheckboxes.forEach(cb => cb.checked = false);
+      }
+      updateLabel();
+      updateFilter();
+    });
+
+    // 個別項目チェック時：「すべて」をオフ
+    otherCheckboxes.forEach(cb => {
+      cb.addEventListener('change', () => {
+        allCheckbox.checked = false;
+        // 全部オフになったら「すべて」に戻す
+        if (otherCheckboxes.every(c => !c.checked)) {
+          allCheckbox.checked = true;
+        }
+        updateLabel();
+        updateFilter();
+      });
+    });
+
+    // ボタンクリックで開閉
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      dropdown.classList.toggle('open');
+    });
+
+    // 外クリックで閉じる
+    document.addEventListener('click', (e) => {
+      if (!wrap.contains(e.target)) dropdown.classList.remove('open');
+    });
+  }
+
+  setupCustomSelect('region-select-wrap', 'region-select-dropdown', 'region-select-btn', 'region-select-label',
+    (v) => { currentRegions = v; });
+  setupCustomSelect('type-select-wrap', 'type-select-dropdown', 'type-select-btn', 'type-select-label',
+    (v) => { currentTypes = v; });
+
+  // グリッド/リスト切替
+  document.getElementById('btn-grid-view').addEventListener('click', () => {
+    isListView = false;
+    document.getElementById('btn-grid-view').classList.add('active');
+    document.getElementById('btn-list-view').classList.remove('active');
+    renderRoutes();
+  });
+  document.getElementById('btn-list-view').addEventListener('click', () => {
+    isListView = true;
+    document.getElementById('btn-list-view').classList.add('active');
+    document.getElementById('btn-grid-view').classList.remove('active');
+    renderRoutes();
+  });
+
+  // モーダル
+  document.getElementById('modal-close').addEventListener('click', () => { _reopenDetailId = null; closeModal(false); });
+  const _submitBtn = document.getElementById('btn-modal-submit');
+  _submitBtn.addEventListener('click', () => { showLoading(); setTimeout(() => { hideLoading(); closeModal(true); }, 700); });
+  // iOS Safari: clickが発火しない場合のtouchend fallback
+  _submitBtn.addEventListener('touchend', (e) => {
+    e.preventDefault();
+    showLoading();
+    setTimeout(() => { hideLoading(); closeModal(true); }, 700);
+  }, { passive: false });
+  document.getElementById('modal-overlay').addEventListener('click', (e) => {
+    if (e.target === document.getElementById('modal-overlay')) closeModal(true);
+  });
+
+  // 詳細シート
+  document.getElementById('detail-close').addEventListener('click', closeDetail);
+  document.getElementById('detail-overlay').addEventListener('click', (e) => {
+    if (e.target === document.getElementById('detail-overlay')) closeDetail();
+  });
+  // 一覧用詳細シート
+  document.getElementById('gd-close').addEventListener('click', closeGalleryDetail);
+  document.getElementById('gallery-detail-overlay').addEventListener('click', (e) => {
+    if (e.target === document.getElementById('gallery-detail-overlay')) closeGalleryDetail();
+  });
+  // gd-map-btn: 取得場所を地図ビューアで表示（イベント委譲）
+  document.getElementById('gd-collected-info').addEventListener('click', (e) => {
+    const btn = e.target.closest('.gd-map-btn');
+    if (!btn) return;
+    e.preventDefault();
+    const lat = parseFloat(btn.dataset.lat);
+    const lng = parseFloat(btn.dataset.lng);
+    const label = btn.dataset.label || '';
+    if (!isNaN(lat) && !isNaN(lng)) openMapViewer(lat, lng, label);
+  });
+  document.getElementById('map-viewer-close').addEventListener('click', closeMapViewer);
+  document.getElementById('detail-edit-btn').addEventListener('click', () => {
+    const id = activeDetailId;
+    closeDetail();
+    _reopenDetailId = id; // 登録後に詳細シートを再表示するフラグ
+    openModal(id);
+  });
+  document.getElementById('detail-toggle-btn').addEventListener('click', () => {
+    if (activeDetailId === null) return;
+    const id = activeDetailId;
+    const d = getRouteData(id);
+    const newVal = !d.collected;
+    const today = todayJST();
+    setRouteData(id, { collected: newVal, date: newVal ? today : null });
+    renderAll();
+    _updateDetailStatus(id, getRouteData(id));
+    // バッジも更新（sign-imgクラスを維持）
+    const badge = document.getElementById('detail-route-badge');
+    const hasSign = badge.classList.contains('sign-img');
+    badge.className = 'detail-route-badge' + (hasSign ? ' sign-img' : '') + (newVal ? ' collected' : '');
+    showToast(newVal ? `国道${id}号 ✓ 取得済みに設定` : `国道${id}号 未取得に戻しました`, newVal ? 'success' : 'default');
+  });
+
+  // 取得トグル
+  document.getElementById('collect-toggle-btn').addEventListener('click', () => {
+    if (activeModalId === null) return;
+    const d = getRouteData(activeModalId);
+    const newVal = !d.collected;
+    const today = todayJST();
+    const _toggleDateRow = document.getElementById('modal-date-row');
+    const _toggleDateInput = document.getElementById('modal-date-input');
+    if (newVal) {
+      _toggleDateRow.style.display = '';
+      if (!_toggleDateInput.value) _toggleDateInput.value = today;
+    } else {
+      _toggleDateRow.style.display = 'none';
+      _toggleDateInput.value = '';
+    }
+    const dateToSave = newVal ? (_toggleDateInput.value || today) : null;
+    setRouteData(activeModalId, { collected: newVal, date: dateToSave });
+    const btn = document.getElementById('collect-toggle-btn');
+    btn.textContent = newVal ? '✓ 取得済み' : '○ 取得済みにする';
+    btn.className = 'collect-toggle' + (newVal ? ' active' : '');
+    updateStats(); buildRegionSummary(); buildRecentList();
+    const card = document.querySelector(`.route-card[data-id="${activeModalId}"]`);
+    if (card) card.classList.toggle('collected', newVal);
+  });
+
+  // その他ページのボタン
+  document.getElementById('btn-export').addEventListener('click', exportData);
+  document.getElementById('btn-import').addEventListener('click', importData);
+  document.getElementById('btn-reset').addEventListener('click', resetData);
+  document.getElementById('btn-clear-cache').addEventListener('click', clearCache);
+
+  // インポートモーダルのボタン
+  document.getElementById('import-btn-merge').addEventListener('click', applyImportMerge);
+  document.getElementById('import-btn-overwrite').addEventListener('click', applyImportOverwrite);
+  document.getElementById('import-btn-cancel').addEventListener('click', closeImportModal);
+  document.getElementById('import-modal-overlay').addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) closeImportModal();
+  });
+
+  // ジオコーディング
+  document.getElementById('btn-geocode').addEventListener('click', geocodeLocation);
+  document.getElementById('modal-location-input').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); geocodeLocation(); }
+  });
+
+  // 緯度経度入力でリンク更新
+  ['modal-lat-input', 'modal-lng-input'].forEach(id => {
+    document.getElementById(id).addEventListener('input', () => {
+      const lat = parseFloat(document.getElementById('modal-lat-input').value);
+      const lng = parseFloat(document.getElementById('modal-lng-input').value);
+      updateMapLink(isNaN(lat) ? null : lat, isNaN(lng) ? null : lng);
+    });
+  });
+
+  // 地図ピッカー
+  document.getElementById('btn-map-picker').addEventListener('click', openMapPicker);
+  document.getElementById('map-picker-cancel').addEventListener('click', closeMapPicker);
+  document.getElementById('map-picker-confirm').addEventListener('click', confirmMapPicker);
+  document.getElementById('map-picker-gps').addEventListener('click', gpsPickerLocation);
+
+  // 写真
+  document.getElementById('photo-input').addEventListener('change', (e) => {
+    addPhotos(e.target.files); e.target.value = '';
+    // 写真追加後、少し待ってから登録ボタンが見えるようにスクロール
+    setTimeout(() => {
+      const btn = document.getElementById('btn-modal-submit');
+      if (btn) btn.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }, 400);
+  });
+
+  // ESC
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && activeModalId !== null) closeModal(true);
+  });
+
+}
+
+// === Service Worker ===
+function registerSW() {
+  if (!('serviceWorker' in navigator)) return;
+
+  navigator.serviceWorker.register('./sw.js').then((reg) => {
+    // 起動時すでに waiting 状態のSWがある場合（タブが長時間開いたままの場合など）
+    if (reg.waiting && navigator.serviceWorker.controller) {
+      showUpdateBanner(reg.waiting);
+    }
+
+    // 新しいSWがインストールされ始めたとき
+    reg.addEventListener('updatefound', () => {
+      const newWorker = reg.installing;
+      if (!newWorker) return;
+      newWorker.addEventListener('statechange', () => {
+        // installed（=waiting）になり、かつ既存SWあり → バナー表示
+        if (newWorker.state === 'installed' && navigator.serviceWorker.controller) {
+          showUpdateBanner(newWorker);
+        }
+      });
+    });
+  }).catch(() => {});
+
+  // SWがskipWaitingした後に全ページをリロード
+  let refreshing = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (refreshing) return;
+    refreshing = true;
+    window.location.reload();
+  });
+}
+
+function showUpdateBanner(newWorker) {
+  const banner = document.getElementById('update-banner');
+  if (!banner || banner.style.display !== 'none') return;
+  banner.style.display = 'flex';
+  document.getElementById('update-banner-btn').addEventListener('click', () => {
+    banner.style.display = 'none';
+    // SWにSKIP_WAITINGを送信 → controllerchangeイベントで自動リロード
+    newWorker.postMessage({ type: 'SKIP_WAITING' });
+  });
+}
+
+// === 起動 ===
+document.addEventListener('DOMContentLoaded', () => {
+  // ウェルカムスクリーン: safe-area確定を待ってからフェードアウト
+  const welcomeScreen = document.getElementById('welcome-screen');
+  setTimeout(() => {
+    welcomeScreen.classList.add('fade-out');
+    welcomeScreen.addEventListener('transitionend', () => {
+      welcomeScreen.classList.add('hidden');
+    }, { once: true });
+  }, 700);
+
+  loadData();
+  setupEvents();
+  renderAll();
+  migratePhotosToIDB(); // 既存写真データをIndexedDBへ移行（初回のみ）
+
+  // メニューカードの遷移イベント
+  document.querySelectorAll('.menu-card').forEach(btn => {
+    btn.addEventListener('click', () => {
+      switchView(btn.dataset.goto);
+    });
+  });
+
+  // ホーム画面から起動
+  switchView('home');
+
+  registerSW();
+});

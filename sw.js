@@ -1,78 +1,50 @@
-const CACHE_NAME = 'kokudo-tracker-v1';
-const STATIC_CACHE = 'kokudo-static-v1';
-
-const STATIC_ASSETS = [
+// ビルド時に自動更新される（デプロイのたびに変わる）
+const CACHE_NAME = 'kokudo-sticker-20260315012555';
+const ASSETS = [
   './',
   './index.html',
-  './js/app.js',
-  './js/roads-data.js',
+  './style.css',
+  './app.js',
+  './data/routes.js',
   './manifest.json',
+  './icons/icon.svg',
   './icons/icon-192.png',
-  './icons/icon-512.png'
+  './icons/icon-512.png',
 ];
 
-const CDN_ASSETS = [
-  'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css',
-  'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'
-];
-
-// インストール時: 静的アセットをキャッシュ
-self.addEventListener('install', event => {
+self.addEventListener('install', (event) => {
   event.waitUntil(
-    Promise.all([
-      caches.open(STATIC_CACHE).then(cache => cache.addAll(STATIC_ASSETS)),
-      caches.open(CACHE_NAME).then(cache => cache.addAll(CDN_ASSETS))
-    ]).then(() => self.skipWaiting())
+    caches.open(CACHE_NAME).then((cache) => cache.addAll(ASSETS))
   );
+  // skipWaiting() を呼ばず、waiting状態で待機する（バナー表示待ち）
 });
 
-// アクティベート時: 古いキャッシュを削除
-self.addEventListener('activate', event => {
+self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then(keys =>
-      Promise.all(
-        keys
-          .filter(key => key !== CACHE_NAME && key !== STATIC_CACHE)
-          .map(key => caches.delete(key))
-      )
-    ).then(() => self.clients.claim())
+    caches.keys().then((keys) =>
+      Promise.all(keys.filter((k) => k !== CACHE_NAME).map((k) => caches.delete(k)))
+    )
   );
+  self.clients.claim();
 });
 
-// フェッチ: キャッシュファーストで対応
-self.addEventListener('fetch', event => {
-  const { request } = event;
+// アプリ側から SKIP_WAITING メッセージを受けたら即時切り替え
+self.addEventListener('message', (event) => {
+  if (event.data?.type === 'SKIP_WAITING') self.skipWaiting();
+});
 
-  // CDNリソースはキャッシュファースト
-  if (request.url.includes('unpkg.com') || request.url.includes('tile.openstreetmap.org')) {
-    event.respondWith(
-      caches.match(request).then(cached => {
-        if (cached) return cached;
-        return fetch(request).then(response => {
-          if (response.ok) {
-            const clone = response.clone();
-            caches.open(CACHE_NAME).then(cache => cache.put(request, clone));
-          }
+self.addEventListener('fetch', (event) => {
+  event.respondWith(
+    caches.match(event.request).then((cached) => {
+      if (cached) return cached;
+      return fetch(event.request).then((response) => {
+        if (!response || response.status !== 200 || response.type === 'opaque') {
           return response;
-        }).catch(() => new Response('', { status: 503 }));
-      })
-    );
-    return;
-  }
-
-  // ローカルアセットはキャッシュファースト→ネットワーク
-  if (request.method === 'GET' && request.url.startsWith(self.location.origin)) {
-    event.respondWith(
-      caches.match(request).then(cached => {
-        const fetchPromise = fetch(request).then(response => {
-          if (response.ok) {
-            const clone = response.clone();
-            caches.open(STATIC_CACHE).then(cache => cache.put(request, clone));
-          }
-          return response;
-        });
-        return cached || fetchPromise;
-      })
-    );
-  }
+        }
+        const clone = response.clone();
+        caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));
+        return response;
+      }).catch(() => caches.match('./index.html'));
+    })
+  );
 });
