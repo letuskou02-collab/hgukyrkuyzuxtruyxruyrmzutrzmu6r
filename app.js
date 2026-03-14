@@ -889,7 +889,7 @@ async function exportData() {
     const photoMap = {};
     for (const entry of allPhotos) {
       if (entry.photos && entry.photos.length > 0) {
-        photoMap[entry.id] = entry.photos;
+        photoMap[entry.routeId] = entry.photos;
       }
     }
     const exportObj = {};
@@ -897,6 +897,12 @@ async function exportData() {
       exportObj[id] = { ...data };
       if (photoMap[Number(id)]) {
         exportObj[id].photos = photoMap[Number(id)];
+      }
+    }
+    // 写真はあるがcollectedDataに記録がない国道も含める
+    for (const [routeId, photos] of Object.entries(photoMap)) {
+      if (!exportObj[routeId]) {
+        exportObj[routeId] = { photos };
       }
     }
     const json = JSON.stringify(exportObj, null, 2);
@@ -1658,6 +1664,26 @@ function setupEvents() {
     showLoading();
     setTimeout(() => { hideLoading(); closeModal(true); }, 700);
   }, { passive: false });
+
+  // 削除ボタン
+  document.getElementById('btn-modal-delete').addEventListener('click', () => {
+    if (activeModalId === null) return;
+    const id = activeModalId;
+    if (!confirm(`国道${id}号のすべてのデータ（取得記録・写真・メモ・場所）を削除します。\nよろしいですか？`)) return;
+    showLoading();
+    setTimeout(() => {
+      delete collectedData[id];
+      saveData();
+      idbDeletePhotos(id).then(() => {
+        hideLoading();
+        activeModalId = null;
+        document.getElementById('modal-overlay').classList.remove('open');
+        document.querySelector('.bottom-tab-bar').style.display = '';
+        renderAll();
+        showToast(`国道${id}号のデータを削除しました`);
+      });
+    }, 700);
+  });
   document.getElementById('modal-overlay').addEventListener('click', (e) => {
     if (e.target === document.getElementById('modal-overlay')) closeModal(true);
   });
